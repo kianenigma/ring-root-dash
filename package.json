@@ -1,0 +1,25 @@
+{
+  "name": "ring-root-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "postinstall": "papi",
+    "papi:people": "papi add people -w wss://paseo-people-next-system-rpc.polkadot.io",
+    "papi:ah": "papi add ah -w wss://paseo-asset-hub-next-rpc.polkadot.io",
+    "papi:regen": "papi generate",
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@polkadot-api/descriptors": "file:.papi/descriptors",
+    "polkadot-api": "^1.23.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}
