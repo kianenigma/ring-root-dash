@@ -1,9 +1,10 @@
 // App entry: shell, connection management, always-live storage subscriptions,
 // and the History page (full-block scan).
 //
-// Two pages: "Live" shows current state via finalized-block subscriptions (no
+// Three pages: "Live" shows current state via finalized-block subscriptions (no
 // manual refresh); "History" runs an accurate full-block scan of the last day and
-// auto-starts on connect.
+// auto-starts on connect; "Setup" verifies the chain's initial-setup steps
+// (one snapshot on connect, manual refresh).
 
 import "./styles.css";
 import { type Endpoints, loadEndpoints, papiConsoleUrl, PRESETS, saveEndpoints } from "./config";
@@ -11,6 +12,8 @@ import { computeInTransit, fetchAhLive, fetchPeopleLive } from "./live";
 import type { AhLive, HistoryResult, PeopleLive } from "./domain";
 import { deriveHistory, type HistoryAcc, scanHistory, type Progress } from "./history";
 import { connect, type Connections, disconnect } from "./papi";
+import { fetchSetup, type SetupState } from "./setup";
+import { renderSetup } from "./setupui";
 import { renderAhLive, renderHistory, renderInTransit, renderPeopleLive } from "./ui";
 import { escapeHtml } from "./format";
 
@@ -33,7 +36,10 @@ interface AppState {
   historyAbort: AbortController | null;
   /** Whether history has been auto-started for the current connection. */
   historyAutoStarted: boolean;
-  page: "live" | "history";
+  setup: SetupState | null;
+  /** Guards against overlapping setup fetches (refresh spam). */
+  setupBusy: boolean;
+  page: "live" | "history" | "setup";
   /** Per-table collapse/filter state, keyed by table id; survives live re-renders. */
   tableUi: Map<string, { collapsed: boolean; filter: string }>;
 }
@@ -50,6 +56,8 @@ const state: AppState = {
   ahBusy: false,
   historyAbort: null,
   historyAutoStarted: false,
+  setup: null,
+  setupBusy: false,
   page: "live",
   tableUi: new Map(),
 };
@@ -72,6 +80,7 @@ function shell(): string {
     <div class="tabs">
       <button class="tab active" data-page="live" title="Current state, read live from chain storage on every finalized block.">Live</button>
       <button class="tab" data-page="history" title="Accurate full-block scan of the last day: register → ring built → received on AH.">History</button>
+      <button class="tab" data-page="setup" title="Verify the initial-setup steps (assets, pools, chunks, collections, invites, games, airdrops) and show the live values used.">Setup</button>
     </div>
     <div id="status" class="status"></div>
   </header>
@@ -96,11 +105,19 @@ function shell(): string {
       </div>
       <div id="history"></div>
     </div>
+    <div id="setup-page" class="page hidden">
+      <div class="hist-toolbar">
+        <button id="refresh-setup" title="Re-read all setup-related storage from both chains. The Setup page is a snapshot (taken on connect), not a live subscription.">Refresh</button>
+        <span id="setup-meta" class="hist-load-label"></span>
+      </div>
+      <div id="setup"></div>
+    </div>
   </main>
   <footer>
     Read-only — no transactions are ever signed or submitted. Live panels subscribe to each chain's
     finalized-block stream. History scans every block in the window on both chains (accurate, not fast)
-    and reconstructs: register (People) → ring built (People) → received (Asset Hub).
+    and reconstructs: register (People) → ring built (People) → received (Asset Hub). Setup verifies
+    the on-chain state written by individuality's scripts/initial-setup and shows the values in use.
   </footer>`;
 }
 
@@ -122,10 +139,10 @@ function setProgress(p: Progress | null): void {
   el.textContent = `${p.phase}… ${p.done}/${p.total} (${pct}%) · ${p.events} events`;
 }
 
-function setPage(page: "live" | "history"): void {
+function setPage(page: AppState["page"]): void {
   state.page = page;
-  document.querySelector("#live-page")!.classList.toggle("hidden", page !== "live");
-  document.querySelector("#history-page")!.classList.toggle("hidden", page !== "history");
+  for (const pg of ["live", "history", "setup"] as const)
+    document.querySelector(`#${pg}-page`)!.classList.toggle("hidden", pg !== page);
   for (const t of document.querySelectorAll<HTMLElement>(".tab"))
     t.classList.toggle("active", t.getAttribute("data-page") === page);
 }
@@ -220,6 +237,38 @@ function renderHistorySection(): void {
   applyTables(el);
 }
 
+function renderSetupSection(): void {
+  if (searchFocusedIn("#setup-page")) return;
+  const el = document.querySelector("#setup")!;
+  el.innerHTML = state.setup ? renderSetup(state.setup) : "";
+  applyTables(el);
+  document.querySelector("#setup-meta")!.textContent = state.setup
+    ? `Snapshot ${new Date(state.setup.fetchedAt).toLocaleTimeString(undefined, { hour12: false })} · People #${state.setup.people.finalized} · AH #${state.setup.assetHub.finalized}`
+    : "";
+}
+
+async function doLoadSetup(): Promise<void> {
+  if (!state.conns) {
+    setStatus("Connect first.", "bad");
+    return;
+  }
+  if (state.setupBusy) return;
+  state.setupBusy = true;
+  const btn = document.querySelector<HTMLButtonElement>("#refresh-setup")!;
+  btn.disabled = true;
+  document.querySelector("#setup-meta")!.textContent = "Reading setup storage…";
+  try {
+    state.setup = await fetchSetup(state.conns);
+    renderSetupSection();
+  } catch (e) {
+    setStatus(`Setup read failed: ${(e as Error).message}`, "bad");
+    document.querySelector("#setup-meta")!.textContent = "";
+  } finally {
+    state.setupBusy = false;
+    btn.disabled = false;
+  }
+}
+
 function teardownSubs(): void {
   for (const s of state.subs) {
     try {
@@ -293,10 +342,12 @@ function doConnect(): void {
   state.history = null;
   state.historyAcc = null;
   state.historyAutoStarted = false;
+  state.setup = null;
   document.querySelector("#people")!.innerHTML = "";
   document.querySelector("#ah")!.innerHTML = "";
   document.querySelector("#intransit")!.innerHTML = "";
   renderHistorySection();
+  renderSetupSection();
 
   setStatus("Connecting…");
   try {
@@ -307,6 +358,8 @@ function doConnect(): void {
       state.historyAutoStarted = true;
       void doLoadHistory(3_600_000);
     }
+    // One setup snapshot per connection; the Setup page has a manual refresh.
+    void doLoadSetup();
   } catch (e) {
     setStatus(`Connect failed: ${(e as Error).message}`, "bad");
   }
@@ -365,9 +418,10 @@ function wire(): void {
   for (const b of document.querySelectorAll<HTMLElement>(".load-history"))
     b.addEventListener("click", () => void doLoadHistory(Number(b.getAttribute("data-window"))));
   document.querySelector("#stop-history")!.addEventListener("click", () => state.historyAbort?.abort());
+  document.querySelector("#refresh-setup")!.addEventListener("click", () => void doLoadSetup());
 
   for (const tab of document.querySelectorAll<HTMLElement>(".tab"))
-    tab.addEventListener("click", () => setPage(tab.getAttribute("data-page") as "live" | "history"));
+    tab.addEventListener("click", () => setPage(tab.getAttribute("data-page") as AppState["page"]));
 
   document.querySelector<HTMLSelectElement>("#preset")!.addEventListener("change", (ev) => {
     const name = (ev.target as HTMLSelectElement).value;

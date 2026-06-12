@@ -37,6 +37,24 @@ export function fmtAgo(unixSeconds: number | bigint): string {
   return fmtDuration(Date.now() - ms) + " ago";
 }
 
+/** Like fmtAgo but also handles future instants ("in 2h 5m"). */
+export function fmtRel(unixSeconds: number | bigint): string {
+  const ms = Number(unixSeconds) * 1000;
+  if (!ms || ms <= 0) return "—";
+  const delta = Date.now() - ms;
+  return delta >= 0 ? `${fmtDuration(delta)} ago` : `in ${fmtDuration(-delta)}`;
+}
+
+/** Format a fixed-point chain amount with the given decimals, e.g. 21000000000000 / 6 -> "21,000,000". */
+export function fmtUnits(amount: bigint, decimals: number): string {
+  const neg = amount < 0n;
+  const abs = neg ? -amount : amount;
+  const base = 10n ** BigInt(decimals);
+  const whole = (abs / base).toLocaleString("en-US");
+  const fracDigits = (abs % base).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return `${neg ? "-" : ""}${whole}${fracDigits ? `.${fracDigits}` : ""}`;
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")

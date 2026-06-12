@@ -7,7 +7,7 @@ from the **People** chain (members pallet + members-notifier) to the **Asset Hub
 ("intermittent ring root propagation lag from People to AH").
 
 It never signs or submits transactions — it only reads storage and events over RPC. It has
-two pages: **Live** and **History**.
+three pages: **Live**, **History** and **Setup**.
 
 ## Live page
 
@@ -57,6 +57,34 @@ missed). Timestamps are read at event blocks, and AH ring receipts are reconstru
 reading `RingRoots` at each AH update block. These chains are ~2s, so a full day is ~43k
 blocks per chain and can take several minutes — use 1h/6h for a quick look, and watch
 results stream in.
+
+## Setup page
+
+Verifies the on-chain state written by individuality's
+[`scripts/initial-setup`](https://github.com/paritytech/individuality/tree/master/scripts/initial-setup)
+against the connected network — e.g. point it at the summit endpoints and see at a glance
+which setup steps have run and with what values. One snapshot is taken on connect (manual
+**Refresh** to re-read).
+
+- **Checklist** — one row per setup script (02 sudo proxy, 03 XTRNL asset/pool/rate/coinage,
+  04 USDT+USDC, 05 faucet funding, 06 PGAS + alias fee, 07 ZK chunks, 08 people collection,
+  09 onboarding sizes, 10 ring-root subscription, 11 design families, 12 attestation
+  invites/allowances/proxies, 13 DotNS dispatcher) with status — **ok** (present, matches
+  the scripted values), **partial** (present but differs), **missing**, or **n/a** (needs
+  the relay chain or per-network account addresses) — and the actual values found on chain.
+- **People / Asset Hub detail panels** — the full values behind each check: foreign assets
+  with metadata + supply, AssetRate conversion rates, ZK chunk pages, onboarding sizes,
+  notifier subscribers, the 38 PoI design families, invites, attestation allowances,
+  proxies; on AH: the four setup assets, AssetConversion pools, alias fee, DotNS dispatcher
+  + allowances.
+- **Games & airdrops** — the current game (phase + deadlines + participants), stored phase
+  durations + play deposit, scheduled games (`Game.GameSchedules`, with attached airdrop
+  prizes), every airdrop event (`Airdrop.Events`) with lifecycle status, timings and prize,
+  supported airdrop assets + funding, and the OCW action schedule.
+
+Expected values (asset ids, supplies, invite counts, …) are taken from
+`scripts/initial-setup/config-base.env` and surfaced as tooltips/comparisons; anything that
+differs is shown with the live value rather than hidden.
 
 ## Networks
 

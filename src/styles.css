@@ -181,6 +181,20 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
 .bad { color: var(--bad); }
+
+/* Setup-checklist status chips. */
+.chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.chip.ok { color: var(--ok); border-color: rgba(74, 222, 128, 0.5); background: rgba(74, 222, 128, 0.08); }
+.chip.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.5); background: rgba(251, 191, 36, 0.08); }
+.chip.bad { color: var(--bad); border-color: rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.08); }
+.chip.na { color: var(--muted); }
 tr.warn td { background: rgba(251, 191, 36, 0.06); }
 tr.people td:nth-child(2) { color: var(--accent); }
 tr.assetHub td:nth-child(2) { color: var(--warn); }

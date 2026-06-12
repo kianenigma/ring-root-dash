@@ -114,4 +114,73 @@ export const TIPS = {
   endToEnd: "register → reflected on Asset Hub: the full pipeline. Flagged red at 2 minutes or more.",
   timeline:
     "Every relevant event from both chains in time order. People: Registered (MemberAdded), RingBuilt, Onboarded. Asset Hub: RingRootsUpdated/Initialized, MissingRingsDetected, ReplayRequestSent. Labeled by timestamp + block.",
+
+  // Setup page
+  setupChecklist:
+    "One row per initial-setup script (individuality/scripts/initial-setup). Status reflects whether the storage that script writes exists on chain right now; the values column shows what was actually found.",
+  setupStatus:
+    "ok = the storage the script writes is present and matches the expected setup values. partial = present but differs from the scripted values. missing = not found. n/a = needs the relay chain or per-network account addresses, so it cannot be verified from a People + Asset Hub connection.",
+  setupScript: "Script number(s) in scripts/initial-setup, e.g. 03a = 03a-setup-xtrnl-ah.sh.",
+  setupValues: "The live on-chain values backing this step (amounts use token decimals).",
+  setupOkCard: "Steps whose on-chain state is present and matches the scripted setup values.",
+  setupWarnCard: "Steps whose on-chain state exists but differs from the scripted values (or is incomplete).",
+  setupBadCard: "Steps whose on-chain state was not found — the script likely has not run on this network.",
+  setupNaCard:
+    "Steps that cannot be verified from here: relay-chain storage (HRMP) or balances of per-network accounts the dashboard does not know.",
+  setupPeopleCollection:
+    "People.PeopleCollectionCreated / PeopleLite.LitePeopleCollectionCreated — set once by create_people_collection (script 08).",
+  setupCoinage:
+    "Coinage.UnderlyingAssetId — the asset coinage coins are denominated in; script 03f points it at the XTRNL foreign asset (asset id 50000413).",
+  setupXtrnlAlias:
+    "Asset 50000413's symbol has been renamed over time (older networks show it as CASH; the setup scripts now call it XTRNL). Same asset either way — an older symbol counts as a match here.",
+  setupForeignAssets:
+    "Assets on the People chain are keyed by XCM location (foreign assets). Scripts 03d/04b create XTRNL, USDT and USDC pointing at the Asset Hub assets pallet.",
+  setupLocation:
+    "XCM location of the asset: ../ = up one level (the relay), Para(n) = sibling parachain, Pallet(n) = pallet instance, Index(n) = pallet-assets asset id.",
+  setupRates:
+    "AssetRate.ConversionRateToNative — fixed-point (1e18) rate from one asset unit to native planck; used to charge fees in the asset. Script 03e sets 1 XTRNL = 0.25 PAS.",
+  setupRawRate: "FixedU128 value: native planck per smallest asset unit, scaled by 1e18.",
+  setupChunks:
+    "ChunksManager.Chunks — pages of Bandersnatch SRS chunks per ring-proof size, uploaded by script 07. The local setup uploads 3 pages for R2e9 and 5 pages for R2e10.",
+  setupChunkPages: "page-index:chunk-count for every uploaded page of this proof size.",
+  setupFamilies:
+    "ProofOfInk.DesignFamilies — tattoo design families addable as proof-of-ink commitments. Script 11 loads 38 families from poi-design-families.json.",
+  setupInvites:
+    "ProofOfInk.AvailableInvites / Game.AvailableInvites — invite budgets per account. Script 12a grants 1,000,000 of each to the attestation account.",
+  setupAllowances:
+    "Attestation allowances: how many attestations an account may still perform (PeopleLite on People, DotnsGateway on Asset Hub). Script 12b sets 1,000,000.",
+  setupProxies:
+    "Proxy.Proxies — proxy delegations. Scripts 02 (sudo proxy on People) and 12c (attestation proxy on both chains) each add an Any proxy. Accounts are per-network.",
+  setupProxyDeposit: "Reserved deposit (in native token) held for the delegator's proxy entries.",
+  setupAliasFee:
+    "AliasAccounts.AliasFee — fee (planck) charged for claiming an account alias. Script 06c sets 1000.",
+  setupDispatcher:
+    "DotnsGateway.DispatcherAddress — the 20-byte (Ethereum-style) address allowed to dispatch DotNS calls. Script 13 sets it; config-local.env ships a 0xdeadbeef… placeholder.",
+  setupAhAssets:
+    "The four assets the setup scripts create on Asset Hub: XTRNL (03a — asset 50000413; networks set up before its rename may show an older symbol like CASH), USDT + USDC (04a) and PGAS (06a), with supply, holder counts and metadata.",
+  setupPools:
+    "AssetConversion.Pools — each pool pairs two XCM locations (one side is usually native PAS). Scripts 03b, 04a and 06b create the XTRNL, USDT/USDC and PGAS pools and add liquidity.",
+  setupLpToken: "Pool-assets id of the LP token minted for liquidity providers of this pool.",
+  setupCurrentGame:
+    "Game.Game — the game currently in progress (if any) with its phase deadlines. Cleared when the game completes.",
+  setupGameIndex: "Index of the current game. GameIndex is the monotonic counter of games started.",
+  setupGameState:
+    "Current phase of the game state machine: Registration, Shuffle (4 steps), Reporting, PlayerProcess or Cancelling.",
+  setupParticipants: "Game.GameParticipantCount for the current game index.",
+  setupPhaseDurations:
+    "Game.StoredPhaseDurations — how long each game phase lasts (seconds), driving the deadlines of every scheduled game.",
+  setupPlayDeposit: "Game.PlayDepositAmount — deposit reserved from each player when joining.",
+  setupGameSchedules:
+    "Game.GameSchedules — upcoming (and past, until pruned) games by play time. A schedule may carry an airdrop prize that funds an Airdrop event for the game's participants.",
+  setupPlayTime: "Unix time the game is scheduled to be played, with relative time.",
+  setupGamePrize:
+    "Optional airdrop attached to the scheduled game: prize asset + amount, max winners, and per-winner cap.",
+  setupAirdrops:
+    "Airdrop.Events — every airdrop event with its lifecycle status (Scheduled → Registering → DrawWinners → Claiming → cleanup) and its prize/timing parameters.",
+  setupAirdropStatus:
+    "Lifecycle status; the numbers show progress, e.g. registered participants, drawn winners, claims so far.",
+  setupSupportedAssets:
+    "Airdrop.SupportedAssets — assets enabled for airdrop prizes and how much funding has been verified for each.",
+  setupActionSchedule:
+    "Airdrop.ActionSchedule — when the offchain worker will next act on each event (advance registration, draw winners, finish claiming…).",
 } as const;

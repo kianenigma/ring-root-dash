@@ -22,23 +22,23 @@ import { identifierLabel } from "./identifiers";
 import { TIPS } from "./tips";
 
 /** A <th> with a tooltip. */
-function th(label: string, tip: string): string {
+export function th(label: string, tip: string): string {
   return `<th title="${tip}">${label}</th>`;
 }
 /** A mono cell showing shortened hex, with the full value as a tooltip. */
-function hexCell(full: string): string {
+export function hexCell(full: string): string {
   return `<td class="mono" title="${full}">${shortHex(full)}</td>`;
 }
 /** A collection-identifier cell: friendly label, full hex as tooltip. */
-function identCell(full: string): string {
+export function identCell(full: string): string {
   return `<td class="ident" title="${full}">${escapeHtml(identifierLabel(full))}</td>`;
 }
 /** Row attribute used by the per-table search to filter by identifier (label + hex). */
-function identAttr(full: string): string {
+export function identAttr(full: string): string {
   return ` data-ident="${escapeHtml(`${identifierLabel(full)} ${full}`.toLowerCase())}"`;
 }
 
-interface TableSpec {
+export interface TableSpec {
   /** Stable id used to persist collapse/filter state across live re-renders. */
   id: string;
   title: string;
@@ -58,7 +58,7 @@ interface TableSpec {
  * filters rows by identifier. Collapse/filter are wired by delegated listeners in
  * main.ts and persisted in app state, so they survive the live per-block re-render.
  */
-function table(spec: TableSpec): string {
+export function table(spec: TableSpec): string {
   const search = spec.searchable
     ? `<input class="table-search" type="search" data-target="${spec.id}" placeholder="filter by identifier…" />`
     : "";

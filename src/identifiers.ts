@@ -37,6 +37,21 @@ function decodeAscii(bytes: number[]): string | null {
   return out;
 }
 
+/** Label for a 32-byte event id: printable ASCII prefix plus a trailing big-endian
+ *  counter, e.g. Airdrop's b"pop:game:airdrop:" + padding + u32 -> "pop:game:airdrop: #37". */
+export function eventIdLabel(hexInput: string): string {
+  const hex = (hexInput.startsWith("0x") ? hexInput : `0x${hexInput}`).toLowerCase();
+  const bytes = bytesOf(hex.slice(2));
+  if (bytes.length === 32) {
+    const head = decodeAscii(bytes.slice(0, 28));
+    if (head !== null) {
+      const idx = (((bytes[28] << 24) | (bytes[29] << 16) | (bytes[30] << 8) | bytes[31]) >>> 0).toString();
+      return `${head} #${idx}`;
+    }
+  }
+  return decodeAscii(bytes) ?? shortHex(hex);
+}
+
 /** Human-readable label for a collection identifier (0x-hex). */
 export function identifierLabel(hexInput: string): string {
   const hex = (hexInput.startsWith("0x") ? hexInput : `0x${hexInput}`).toLowerCase();
