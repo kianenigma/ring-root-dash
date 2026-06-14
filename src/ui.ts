@@ -4,7 +4,7 @@
 // Tooltips: column headers, card labels and key/value rows carry a `title` from
 // the TIPS glossary; shortened hex cells carry their full value as a `title`.
 
-import { SLOW_LAG_MS } from "./config";
+import { type Endpoints, papiConsoleUrl, SLOW_LAG_MS } from "./config";
 import {
   type AhLive,
   type CohortStatus,
@@ -51,6 +51,10 @@ export interface TableSpec {
   cols: number;
   /** Show the slim identifier search bar. */
   searchable?: boolean;
+  /** Render the body in a scroll area with a frozen (sticky) header row. */
+  scroll?: boolean;
+  /** If set, show a "⤓ CSV" button carrying this key; the download is wired in main.ts. */
+  exportKey?: string;
 }
 
 /**
@@ -62,14 +66,18 @@ export function table(spec: TableSpec): string {
   const search = spec.searchable
     ? `<input class="table-search" type="search" data-target="${spec.id}" placeholder="filter by identifier…" />`
     : "";
+  const exportBtn = spec.exportKey
+    ? `<button class="export-btn" data-export="${spec.exportKey}" title="Download this table as a CSV file (links stripped, full values kept)">⤓ CSV</button>`
+    : "";
   const titleAttr = spec.tip ? ` title="${spec.tip}"` : "";
   return `
-  <div class="tbl" data-table-id="${spec.id}">
+  <div class="tbl${spec.scroll ? " scroll" : ""}" data-table-id="${spec.id}">
     <div class="tbl-bar">
       <button class="collapse-btn" data-target="${spec.id}" title="Collapse / expand" aria-label="Collapse or expand">▾</button>
       <h3${titleAttr}>${spec.title}</h3>
       ${search}
       <span class="tbl-count" data-target="${spec.id}"></span>
+      ${exportBtn}
     </div>
     <div class="tbl-body">
       <table>
@@ -276,11 +284,18 @@ export function renderInTransit(rows: InTransitRow[]): string {
   </section>`;
 }
 
-/** time + block label, e.g. "12:01:03 #1234". */
-function tb(timeMs: number | null, block: number | null): string {
+/** A block number rendered as a deep link into the PAPI explorer for its chain. */
+function blockLink(block: number | null, chain: "people" | "assetHub", ep: Endpoints): string {
+  if (block === null) return "";
+  const endpoint = chain === "people" ? ep.people : ep.assetHub;
+  return `<a class="block-link" href="${papiConsoleUrl(endpoint, block)}" target="_blank" rel="noopener" title="Open ${chain === "people" ? "People" : "Asset Hub"} block #${block} in the PAPI explorer">#${block}</a>`;
+}
+
+/** time + clickable block label, e.g. "12:01:03 #1234" where #1234 links to the explorer. */
+function tb(timeMs: number | null, block: number | null, chain: "people" | "assetHub", ep: Endpoints): string {
   if (block === null && timeMs === null) return "—";
   const t = timeMs ? fmtTime(timeMs, "ms") : "—";
-  return `${t}${block !== null ? ` <small>#${block}</small>` : ""}`;
+  return `${t}${block !== null ? ` <small>${blockLink(block, chain, ep)}</small>` : ""}`;
 }
 
 function ringLabel(identifier: string | null, ringIndex: number | null): string {
@@ -288,14 +303,14 @@ function ringLabel(identifier: string | null, ringIndex: number | null): string 
   return `<span class="ident" title="${identifier}">${escapeHtml(identifierLabel(identifier))}</span> · ${ringIndex}`;
 }
 
-export function renderHistory(h: HistoryResult): string {
+export function renderHistory(h: HistoryResult, ep: Endpoints): string {
   const notes = h.notes.length
     ? `<div class="notes">${h.notes.map((n) => `<div>⚠️ ${escapeHtml(n)}</div>`).join("")}</div>`
     : "";
   const summary = `
     <div class="hist-summary" title="${TIPS.historyWindow}">
-      <div><b>People</b> window ${tb(h.people.fromTimeMs, h.people.fromBlock)} → ${tb(h.people.headTimeMs, h.people.headBlock)} · ${h.scannedPeople} blocks scanned</div>
-      <div><b>Asset Hub</b> window ${tb(h.assetHub.fromTimeMs, h.assetHub.fromBlock)} → ${tb(h.assetHub.headTimeMs, h.assetHub.headBlock)} · ${h.scannedAh} blocks scanned</div>
+      <div><b>People</b> window ${tb(h.people.fromTimeMs, h.people.fromBlock, "people", ep)} → ${tb(h.people.headTimeMs, h.people.headBlock, "people", ep)} · ${h.scannedPeople} blocks scanned</div>
+      <div><b>Asset Hub</b> window ${tb(h.assetHub.fromTimeMs, h.assetHub.fromBlock, "assetHub", ep)} → ${tb(h.assetHub.headTimeMs, h.assetHub.headBlock, "assetHub", ep)} · ${h.scannedAh} blocks scanned</div>
       <div>${h.registrations.length} registrations · ${h.rings.length} ring builds · ${h.events.length} events${h.inProgress ? " · <span class=\"warn\">scanning…</span>" : ""}</div>
     </div>`;
 
@@ -304,13 +319,13 @@ export function renderHistory(h: HistoryResult): string {
     <h2>History <small>3-stage pipeline: register → ring built (People) → received (AH)</small></h2>
     ${notes}
     ${summary}
-    ${renderRegistrationDelays(h.registrations)}
-    ${renderRingLifecycles(h.rings)}
-    ${renderTimeline(h.events)}
+    ${renderRegistrationDelays(h.registrations, ep)}
+    ${renderRingLifecycles(h.rings, ep)}
+    ${renderTimeline(h.events, ep)}
   </section>`;
 }
 
-function renderRegistrationDelays(rows: RegistrationDelay[]): string {
+function renderRegistrationDelays(rows: RegistrationDelay[], ep: Endpoints): string {
   const body = rows
     .map((r) => {
       const total = r.totalMs;
@@ -334,10 +349,10 @@ function renderRegistrationDelays(rows: RegistrationDelay[]): string {
       );
       return `<tr data-ident="${search}">
         <td class="mono" title="${r.memberKey}">${shortHex(r.memberKey)}</td>
-        <td>${tb(r.regTimeMs, r.regBlock)}</td>
+        <td>${tb(r.regTimeMs, r.regBlock, "people", ep)}</td>
         <td>${ringLabel(r.identifier, r.ringIndex)}</td>
-        <td>${tb(r.builtTimeMs, r.builtBlock)}</td>
-        <td>${tb(r.receivedTimeMs, r.receivedBlock)}</td>
+        <td>${tb(r.builtTimeMs, r.builtBlock, "people", ep)}</td>
+        <td>${tb(r.receivedTimeMs, r.receivedBlock, "assetHub", ep)}</td>
         <td>${r.onboardMs !== null ? fmtDuration(r.onboardMs) : "—"}</td>
         <td>${r.propagationMs !== null ? fmtDuration(r.propagationMs) : "—"}</td>
         <td>${totalCell}</td>
@@ -353,10 +368,12 @@ function renderRegistrationDelays(rows: RegistrationDelay[]): string {
     rows: body,
     cols: 9,
     searchable: true,
+    scroll: true,
+    exportKey: "registrations",
   });
 }
 
-function renderRingLifecycles(rings: RingLifecycle[]): string {
+function renderRingLifecycles(rings: RingLifecycle[], ep: Endpoints): string {
   const body = rings
     .map((r) => {
       const note = r.receivedBeforeWindow
@@ -367,8 +384,8 @@ function renderRingLifecycles(rings: RingLifecycle[]): string {
       return `<tr${identAttr(r.identifier)}>
         ${identCell(r.identifier)}
         <td>${r.ringIndex}</td>
-        <td>${tb(r.builtTimeMs, r.builtBlock)}</td>
-        <td>${tb(r.receivedTimeMs, r.receivedBlock)}</td>
+        <td>${tb(r.builtTimeMs, r.builtBlock, "people", ep)}</td>
+        <td>${tb(r.receivedTimeMs, r.receivedBlock, "assetHub", ep)}</td>
         <td>${r.propagationMs !== null ? fmtDuration(r.propagationMs) : "—"}</td>
         <td>${note}</td>
       </tr>`;
@@ -382,10 +399,12 @@ function renderRingLifecycles(rings: RingLifecycle[]): string {
     rows: body,
     cols: 6,
     searchable: true,
+    scroll: true,
+    exportKey: "rings",
   });
 }
 
-function renderTimeline(events: TimedEvent[]): string {
+function renderTimeline(events: TimedEvent[], ep: Endpoints): string {
   const body = events
     .map((e) => {
       const where = e.chain === "people" ? "People" : "AH";
@@ -395,7 +414,7 @@ function renderTimeline(events: TimedEvent[]): string {
           : "";
       const detail = [ring, e.detail].filter(Boolean).join(" — ");
       const search = escapeHtml(`${e.kind} ${ring} ${e.detail ?? ""}`.toLowerCase());
-      return `<tr class="${e.chain}" data-ident="${search}"><td>${e.timeMs ? fmtTime(e.timeMs, "ms") : "—"}</td><td><small>#${e.block}</small></td><td>${where}</td><td>${escapeHtml(e.kind)}</td><td class="mono detail">${escapeHtml(detail)}</td></tr>`;
+      return `<tr class="${e.chain}" data-ident="${search}"><td>${e.timeMs ? fmtTime(e.timeMs, "ms") : "—"}</td><td><small>${blockLink(e.block, e.chain, ep)}</small></td><td>${where}</td><td>${escapeHtml(e.kind)}</td><td class="mono detail">${escapeHtml(detail)}</td></tr>`;
     })
     .join("");
   return table({
@@ -406,6 +425,8 @@ function renderTimeline(events: TimedEvent[]): string {
     rows: body,
     cols: 5,
     searchable: true,
+    scroll: true,
+    exportKey: "timeline",
   });
 }
 

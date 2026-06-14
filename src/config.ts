@@ -29,17 +29,17 @@ export const PRESETS: Preset[] = [
 ];
 
 /** Deep link to the PAPI dev console (dev.papi.how) connected to a given endpoint.
- *  Format: https://dev.papi.how/explorer#networkId=<id>&endpoint=<url-encoded-wss>
- *  networkId is just a label; the endpoint is what the console connects to. */
-export function papiConsoleUrl(endpoint: string): string {
-  let networkId = "custom";
-  try {
-    const host = new URL(endpoint).host; // e.g. paseo-people-next-rpc.polkadot.io
-    networkId = host.split(".")[0].replace(/-rpc$/, "").replace(/-/g, "_") || "custom";
-  } catch {
-    // leave default networkId
-  }
-  return `https://dev.papi.how/explorer#networkId=${networkId}&endpoint=${encodeURIComponent(endpoint)}`;
+ *  Format: https://dev.papi.how/explorer[/<block>]#networkId=custom&endpoint=<url-encoded-wss>
+ *  Pass `block` (number or hash) to deep-link a specific block; omit it for the
+ *  console root.
+ *
+ *  networkId MUST be "custom": the console honors the `endpoint` param only for the
+ *  custom network. Any recognizable label (e.g. a derived "paseo_asset_hub_next")
+ *  makes the console load its own built-in chain by that id and ignore `endpoint`,
+ *  which is how a paseo endpoint ended up showing mainnet Asset Hub. */
+export function papiConsoleUrl(endpoint: string, block?: number | string): string {
+  const path = block === undefined ? "" : `/${block}`;
+  return `https://dev.papi.how/explorer${path}#networkId=custom&endpoint=${encodeURIComponent(endpoint)}`;
 }
 
 const STORAGE_KEY = "ring-root-dashboard.endpoints";

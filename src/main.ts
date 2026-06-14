@@ -12,6 +12,7 @@ import { computeInTransit, fetchAhLive, fetchPeopleLive } from "./live";
 import type { AhLive, HistoryResult, PeopleLive } from "./domain";
 import { deriveHistory, type HistoryAcc, scanHistory, type Progress } from "./history";
 import { connect, type Connections, disconnect } from "./papi";
+import { historyCsv, type HistoryTable } from "./csv";
 import { fetchSetup, type SetupState } from "./setup";
 import { renderSetup } from "./setupui";
 import { renderAhLive, renderHistory, renderInTransit, renderPeopleLive } from "./ui";
@@ -233,8 +234,21 @@ function renderHistorySection(): void {
   // Don't wipe a history search box mid-type during progressive updates.
   if (searchFocusedIn("#history-page")) return;
   const el = document.querySelector("#history")!;
-  el.innerHTML = state.history ? renderHistory(state.history) : "";
+  el.innerHTML = state.history ? renderHistory(state.history, state.endpoints) : "";
   applyTables(el);
+}
+
+/** Trigger a client-side download of CSV text (with a UTF-8 BOM so Excel reads hex/labels). */
+function downloadCsv(filename: string, content: string): void {
+  const blob = new Blob(["﻿" + content], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function renderSetupSection(): void {
@@ -430,6 +444,20 @@ function wire(): void {
       document.querySelector<HTMLInputElement>("#ep-people")!.value = preset.people;
       document.querySelector<HTMLInputElement>("#ep-ah")!.value = preset.assetHub;
     }
+  });
+
+  // Delegated handler for the per-table CSV export buttons (History page).
+  app.addEventListener("click", (ev) => {
+    const btn = (ev.target as HTMLElement).closest<HTMLElement>(".export-btn");
+    if (!btn) return;
+    const key = btn.getAttribute("data-export") as HistoryTable | null;
+    if (!key) return;
+    if (!state.history) {
+      setStatus("No history loaded yet — run a scan first.", "bad");
+      return;
+    }
+    const { filename, content } = historyCsv(state.history, key);
+    downloadCsv(filename, content);
   });
 
   // Delegated handlers for table collapse/search. Attached to the persistent #app
