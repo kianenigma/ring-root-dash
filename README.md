@@ -27,12 +27,17 @@ every new finalized block; there is no manual refresh.
 
 ## History page
 
-On connect it shows **max(last 1 hour, whatever is already cached)** — i.e. it scans back to
-the earliest block still in the local cache (per chain), or the last hour if that's larger,
-so a prior session's data reappears instantly and only the recent gap is fetched. You can
-then load **+1m / +10m / +1h / +6h / +1d / +1w** more, each extending further into the past
-**from the earliest block currently shown** (re-using the cache, fetching only what's
-missing). Loads larger than **10 minutes** are scanned in **10-minute chunks and rendered
+On connect, startup depends on the cache:
+- **Nothing cached** → scan the **last 1 hour**.
+- **Something cached** → fill the gap between the newest cached block and the current tip, and
+  **stop at the cached extent** (the oldest cached block). The prior session's data reappears
+  instantly (replayed from cache) and only the recent gap is fetched — even if the cached
+  extent is shorter or much longer than an hour.
+
+Either way the two chains are scanned to the **same wall-clock floor**, so after startup the
+People and Asset Hub ranges are guaranteed **contiguous and time-matched**. You can then load
+**+1m / +10m / +1h / +6h / +1d / +1w** more, each extending further into the past **from the
+earliest block currently shown** (re-using the cache, fetching only what's missing). Loads larger than **10 minutes** are scanned in **10-minute chunks and rendered
 progressively** — results (and the cache) update after each chunk instead of waiting for the
 whole window, so a `+1w` fills in as it goes. Each chunk is committed atomically, so **Stop**
 (or a failure) keeps every fully-scanned chunk and discards only the one in flight. A

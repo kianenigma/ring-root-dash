@@ -261,12 +261,21 @@ export async function scanHistory(
   // AH side never scanned, showing a permanent false "pending". Instead we pick one
   // shared wall-clock floor and binary-search each chain for the first block at/after
   // it, so both chains always cover the same time span.
-  let targetMs = acc.scanFloorMs - windowMs;
-  // First load shows max(default window, cached extent): pull the floor down to the
-  // oldest cached block's time so prior scans reappear instantly (gaps are re-fetched).
+  // Both chains scan down to the SAME wall-clock floor each load, so their ranges stay
+  // time-matched (and contiguous across loads — this is the critical invariant).
+  //
+  // First load with a cache: fill the gap up to the tip and STOP at the oldest cached
+  // block's time — no default-window floor (CACHE-2). Startup just makes the cached
+  // region contiguous to the tip; a later +window load extends below the cached extent.
+  // First load with no cache: scan the default window below the head.
+  let targetMs: number;
   if (isFirstLoad) {
-    if (acc.pCachedFromTimeMs != null) targetMs = Math.min(targetMs, acc.pCachedFromTimeMs);
-    if (acc.aCachedFromTimeMs != null) targetMs = Math.min(targetMs, acc.aCachedFromTimeMs);
+    const cachedFloors = [acc.pCachedFromTimeMs, acc.aCachedFromTimeMs].filter(
+      (t): t is number => t != null,
+    );
+    targetMs = cachedFloors.length ? Math.min(...cachedFloors) : acc.scanFloorMs - windowMs;
+  } else {
+    targetMs = acc.scanFloorMs - windowMs;
   }
   targetMs = Math.max(0, targetMs);
 

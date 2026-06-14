@@ -162,12 +162,20 @@ function setProgress(p: Progress | null): void {
   el.textContent = `${p.phase}… ${p.done}/${p.total} (${pct}%) · ${p.events} events`;
 }
 
+/** The active tab, read from the URL hash (so a reload restores it). */
+function pageFromHash(): AppState["page"] {
+  const h = location.hash.replace(/^#/, "");
+  return h === "history" || h === "setup" ? h : "live";
+}
+
 function setPage(page: AppState["page"]): void {
   state.page = page;
   for (const pg of ["live", "history", "setup"] as const)
     document.querySelector(`#${pg}-page`)!.classList.toggle("hidden", pg !== page);
   for (const t of document.querySelectorAll<HTMLElement>(".tab"))
     t.classList.toggle("active", t.getAttribute("data-page") === page);
+  // Reflect the tab in the URL (no history entry) so reloading restores it.
+  if (location.hash !== `#${page}`) history.replaceState(null, "", `#${page}`);
   // Chart.js can't measure the canvas while its tab is hidden; fix up on reveal.
   if (page === "history") resizeTimingChart();
 }
@@ -521,13 +529,24 @@ async function doLoadHistory(windowMs: number): Promise<void> {
       state.historyAcc = acc;
       render(false);
 
-      // Learn the overall target once the head time is known (first load).
+      // Learn the overall target once the head time is known (first load). If a cache
+      // exists, startup stops at the oldest cached extent (chunk 1's pull-down already
+      // reached it) — fill the gap to the tip and stop, per CACHE-2. Otherwise scan the
+      // default window below the head. Must mirror scanHistory's first-load target so
+      // the loop breaks exactly when chunk 1 has reached it.
       if (targetFloorMs === null) {
-        const headFloor = Math.min(
-          acc.pHeadTimeMs ?? Number.POSITIVE_INFINITY,
-          acc.aHeadTimeMs ?? Number.POSITIVE_INFINITY,
+        const cachedFloors = [acc.pCachedFromTimeMs, acc.aCachedFromTimeMs].filter(
+          (t): t is number => t != null,
         );
-        targetFloorMs = (Number.isFinite(headFloor) ? headFloor : acc.scanFloorMs) - windowMs;
+        if (cachedFloors.length) {
+          targetFloorMs = Math.min(...cachedFloors);
+        } else {
+          const headFloor = Math.min(
+            acc.pHeadTimeMs ?? Number.POSITIVE_INFINITY,
+            acc.aHeadTimeMs ?? Number.POSITIVE_INFINITY,
+          );
+          targetFloorMs = (Number.isFinite(headFloor) ? headFloor : acc.scanFloorMs) - windowMs;
+        }
       }
       // Stop early if both chains hit genesis (nothing new scanned), or we/the cache
       // have already covered the requested window.
@@ -675,5 +694,7 @@ const matching = PRESETS.find(
 );
 if (matching) document.querySelector<HTMLSelectElement>("#preset")!.value = matching.name;
 wire();
+// Restore the active tab from the URL hash (default: live) so a reload keeps it.
+setPage(pageFromHash());
 void refreshCacheStat();
 doConnect();
