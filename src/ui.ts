@@ -17,6 +17,7 @@ import {
   type RingLifecycle,
   type TimedEvent,
 } from "./domain";
+import { timingChartHtml } from "./chart";
 import { escapeHtml, fmtAgo, fmtDuration, fmtTime, shortHex } from "./format";
 import { identifierLabel } from "./identifiers";
 import { TIPS } from "./tips";
@@ -316,6 +317,7 @@ export function renderHistory(h: HistoryResult, ep: Endpoints): string {
 
   return `
   <section class="panel full">
+    ${timingChartHtml()}
     <h2>History <small>3-stage pipeline: register → ring built (People) → received (AH)</small></h2>
     ${notes}
     ${summary}

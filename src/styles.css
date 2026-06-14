@@ -196,6 +196,26 @@ th { color: var(--muted); font-weight: 500; }
 }
 .block-link { color: var(--accent); text-decoration: none; }
 .block-link:hover { text-decoration: underline; }
+
+/* Propagation-timing chart (History page). */
+.chart {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.chart-title { font-size: 13px; font-weight: 600; color: var(--text); cursor: help; }
+.chart-canvas-wrap { position: relative; height: 260px; }
 table.kv th { width: 220px; }
 tr:hover td { background: rgba(255,255,255,0.02); }
 

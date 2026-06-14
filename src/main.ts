@@ -12,6 +12,7 @@ import { computeInTransit, fetchAhLive, fetchPeopleLive } from "./live";
 import type { AhLive, HistoryResult, PeopleLive } from "./domain";
 import { deriveHistory, type HistoryAcc, scanHistory, type Progress } from "./history";
 import { connect, type Connections, disconnect } from "./papi";
+import { drawTimingChart, resizeTimingChart } from "./chart";
 import { historyCsv, type HistoryTable } from "./csv";
 import { fetchSetup, type SetupState } from "./setup";
 import { renderSetup } from "./setupui";
@@ -101,6 +102,7 @@ function shell(): string {
         <button class="load-history" data-window="3600000" title="Scan 1 more hour of older history.">+1h</button>
         <button class="load-history" data-window="21600000" title="Scan 6 more hours of older history.">+6h</button>
         <button class="load-history" data-window="86400000" title="Scan 1 more day of older history.">+1d</button>
+        <button class="load-history" data-window="604800000" title="Scan 1 more week of older history. This reads every block on both chains over a week (~300k blocks/chain) and can take a long while — use Stop to cancel.">+1w</button>
         <button id="stop-history" class="hidden" title="Abort the in-progress history scan.">Stop</button>
         <span id="progress" class="progress hidden"></span>
       </div>
@@ -146,6 +148,8 @@ function setPage(page: AppState["page"]): void {
     document.querySelector(`#${pg}-page`)!.classList.toggle("hidden", pg !== page);
   for (const t of document.querySelectorAll<HTMLElement>(".tab"))
     t.classList.toggle("active", t.getAttribute("data-page") === page);
+  // Chart.js can't measure the canvas while its tab is hidden; fix up on reveal.
+  if (page === "history") resizeTimingChart();
 }
 
 /** True if a table-search input inside `containerSel` currently has focus.
@@ -236,6 +240,9 @@ function renderHistorySection(): void {
   const el = document.querySelector("#history")!;
   el.innerHTML = state.history ? renderHistory(state.history, state.endpoints) : "";
   applyTables(el);
+  // The chart is a canvas hydrated by Chart.js, so it must be (re)drawn after the
+  // panel's innerHTML is swapped in (or torn down when there's no history).
+  drawTimingChart(el, state.history);
 }
 
 /** Trigger a client-side download of CSV text (with a UTF-8 BOM so Excel reads hex/labels). */

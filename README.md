@@ -27,9 +27,11 @@ every new finalized block; there is no manual refresh.
 
 ## History page
 
-Auto-runs a **1-hour** scan on connect; you can also load **1h / 6h / 1d**. The page shows
-**nothing until the whole window has been scanned on both chains** (no partial results); a
-progress indicator shows how far along the scan is, and **Stop** cancels it.
+Auto-runs a **1-hour** scan on connect; you can also load **+1m / +10m / +1h / +6h / +1d /
++1w** more (each extends further into the past). The page shows **nothing until the whole
+window has been scanned on both chains** (no partial results); a progress indicator shows how
+far along the scan is, and **Stop** cancels it. (`+1w` reads ~300k blocks per chain and can
+take a long while.)
 
 It reconstructs the three-stage pipeline for every member of an **AH-subscribed collection**
 (coinage and other never-propagated collections are excluded):
@@ -40,6 +42,11 @@ It reconstructs the three-stage pipeline for every member of an **AH-subscribed 
 
 and shows:
 
+- **Stalls over scanned window** (chart, top of page) — a stacked bar chart whose x axis is
+  the timespan scanned locally and whose y axis counts stalls per time bucket: **ring-build
+  stalls** (reg→onboard reached the slow threshold or still pending, anchored at register
+  time) and **propagation stalls** (onboard→AH reached the threshold or built-but-not-yet-
+  received, anchored at build time). Extends as you load more history.
 - **Registrations → Asset Hub** — per registration: `reg→onboard` (queue + cohort gating +
   OCW build) and `onboard→AH` (propagation), with the end-to-end total flagged **slow** at
   ≥2 minutes (`SLOW_LAG_MS`). This is the headline: *a person registered but reported to AH
@@ -47,7 +54,9 @@ and shows:
 - **Ring lifecycle** — per ring: built on People → received on AH + propagation delay.
 - **Event timeline** — every relevant event from both chains in time order.
 
-Everything is labeled by both **block number and timestamp**.
+Everything is labeled by both **block number and timestamp**; every block number deep-links
+into the PAPI explorer for the right chain. Each of the three tables has a **⤓ CSV** button
+(links stripped, full values kept) and a frozen header row while scrolling.
 
 ### How history is scanned
 
