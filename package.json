@@ -17,6 +17,7 @@
   "dependencies": {
     "@polkadot-api/descriptors": "file:.papi/descriptors",
     "chart.js": "^4.5.1",
+    "chartjs-plugin-zoom": "^2.2.0",
     "polkadot-api": "^1.23.3"
   },
   "devDependencies": {

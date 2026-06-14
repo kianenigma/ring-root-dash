@@ -13,7 +13,13 @@ import type { AhLive, HistoryResult, PeopleLive } from "./domain";
 import { deriveHistory, type HistoryAcc, scanHistory, type Progress } from "./history";
 import { connect, type Connections, disconnect } from "./papi";
 import { cacheStats, clearCache, exportCache, importCache } from "./cache";
-import { drawTimingChart, resizeTimingChart } from "./chart";
+import {
+  closeTimingChartModal,
+  drawTimingChart,
+  openTimingChartModal,
+  resetZoom,
+  resizeTimingChart,
+} from "./chart";
 import { historyCsv, type HistoryTable } from "./csv";
 import { fetchSetup, type SetupState } from "./setup";
 import { renderSetup } from "./setupui";
@@ -127,7 +133,15 @@ function shell(): string {
     finalized-block stream. History scans every block in the window on both chains (accurate, not fast)
     and reconstructs: register (People) → ring built (People) → received (Asset Hub). Setup verifies
     the on-chain state written by individuality's scripts/initial-setup and shows the values in use.
-  </footer>`;
+  </footer>
+  <div id="chart-modal" class="modal hidden">
+    <div class="modal-bar">
+      <span class="modal-title">Propagation times over scanned window</span>
+      <button id="chart-modal-reset" title="Reset pan/zoom to fit all data">reset zoom</button>
+      <button id="chart-modal-close" title="Close (Esc)">✕ close</button>
+    </div>
+    <div class="modal-canvas-wrap"><canvas id="chart-modal-canvas"></canvas></div>
+  </div>`;
 }
 
 function setStatus(msg: string, kind: "" | "ok" | "bad" = ""): void {
@@ -249,6 +263,19 @@ function renderHistorySection(): void {
   // The chart is a canvas hydrated by Chart.js, so it must be (re)drawn after the
   // panel's innerHTML is swapped in (or torn down when there's no history).
   drawTimingChart(el, state.history);
+}
+
+/** Open the full-screen chart modal with a snapshot of the current history. */
+function openChartModal(): void {
+  if (!state.history) {
+    setStatus("No history loaded yet — run a scan first.", "bad");
+    return;
+  }
+  const modal = document.querySelector<HTMLDivElement>("#chart-modal")!;
+  modal.classList.remove("hidden");
+  // Draw after the modal is visible so Chart.js can measure the now-sized canvas.
+  const canvas = document.querySelector<HTMLCanvasElement>("#chart-modal-canvas")!;
+  openTimingChartModal(canvas, state.history);
 }
 
 function fmtBytes(b: number): string {
@@ -467,6 +494,8 @@ async function doLoadHistory(windowMs: number): Promise<void> {
     lastRenderMs = now;
     state.history = deriveHistory(state.historyAcc);
     renderHistorySection();
+    // The cache is written every chunk, so keep the block-count / size readout live.
+    void refreshCacheStat();
   };
 
   try {
@@ -579,6 +608,25 @@ function wire(): void {
       document.querySelector<HTMLInputElement>("#ep-people")!.value = preset.people;
       document.querySelector<HTMLInputElement>("#ep-ah")!.value = preset.assetHub;
     }
+  });
+
+  // Delegated handlers for the chart's "reset zoom" / "full screen" buttons (they
+  // are re-rendered with the panel, so listen on the persistent #app root).
+  app.addEventListener("click", (ev) => {
+    const t = ev.target as HTMLElement;
+    if (t.closest(".chart-reset")) resetZoom();
+    else if (t.closest(".chart-fullscreen")) openChartModal();
+  });
+
+  const modal = document.querySelector<HTMLDivElement>("#chart-modal")!;
+  const closeModal = (): void => {
+    modal.classList.add("hidden");
+    closeTimingChartModal();
+  };
+  document.querySelector("#chart-modal-close")!.addEventListener("click", closeModal);
+  document.querySelector("#chart-modal-reset")!.addEventListener("click", () => resetZoom());
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !modal.classList.contains("hidden")) closeModal();
   });
 
   // Delegated handler for the per-table CSV export buttons (History page).

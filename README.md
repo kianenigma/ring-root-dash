@@ -48,11 +48,15 @@ It reconstructs the three-stage pipeline for every member of an **AH-subscribed 
 
 and shows:
 
-- **Stalls over scanned window** (chart, top of page) — a stacked bar chart whose x axis is
-  the timespan scanned locally and whose y axis counts stalls per time bucket: **ring-build
-  stalls** (reg→onboard reached the slow threshold or still pending, anchored at register
-  time) and **propagation stalls** (onboard→AH reached the threshold or built-but-not-yet-
-  received, anchored at build time). Extends as you load more history.
+- **Propagation times over scanned window** (chart, top of page) — a [Chart.js](https://www.chartjs.org/)
+  line chart, one point per registration at its register time, with three series: `reg→onboard`,
+  `onboard→AH`, and `total` (durations). A dashed marker shows the `SLOW_LAG_MS` threshold; the
+  axis always includes it so it stays visible. It's an **overview, not an exact plot** —
+  overlapping points (same spot on a coarse grid) are dropped, so a week of data stays light.
+  **Scroll to zoom, drag to pan** (both axes, via
+  [`chartjs-plugin-zoom`](https://github.com/chartjs/chartjs-plugin-zoom)); **reset zoom** refits,
+  and **⤢ full screen** opens it in a whole-screen modal (Esc to close). Extends as you load more
+  history.
 - **Registrations → Asset Hub** — per registration: `reg→onboard` (queue + cohort gating +
   OCW build) and `onboard→AH` (propagation), with the end-to-end total flagged **slow** at
   ≥2 minutes (`SLOW_LAG_MS`). This is the headline: *a person registered but reported to AH

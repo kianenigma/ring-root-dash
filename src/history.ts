@@ -261,7 +261,6 @@ export async function scanHistory(
   // AH side never scanned, showing a permanent false "pending". Instead we pick one
   // shared wall-clock floor and binary-search each chain for the first block at/after
   // it, so both chains always cover the same time span.
-  onProgress({ phase: "Locating window", done: 0, total: 1, events: 0 });
   let targetMs = acc.scanFloorMs - windowMs;
   // First load shows max(default window, cached extent): pull the floor down to the
   // oldest cached block's time so prior scans reappear instantly (gaps are re-fetched).
@@ -273,13 +272,26 @@ export async function scanHistory(
 
   const pTo = acc.pMinScanned - 1; // one below the earliest already scanned (or head on first load)
   const aTo = acc.aMinScanned - 1;
-  const timeMetric = (read: (h: Hex) => Promise<bigint>, hashes: HashCache) => async (n: number) => {
-    const t = await tsAt(read, hashes, n);
-    return t == null ? Number.NEGATIVE_INFINITY : t;
+  // The from-block sits at most ~window/MIN_BLOCK_MS blocks below `to`, so we bound the
+  // binary search to that span instead of the whole chain (log2(span) vs log2(height) —
+  // a big saving when this runs once per 10m chunk). If the bound was too tight (chain
+  // faster than MIN_BLOCK_MS, or a deep cached-extent pull-down), we fall back to a full
+  // search, so the result stays exact.
+  const MIN_BLOCK_MS = 500;
+  const locate = async (read: (h: Hex) => Promise<bigint>, hashes: HashCache, to: number) => {
+    if (to < 1) return null;
+    const metric = async (n: number) => {
+      const t = await tsAt(read, hashes, n);
+      return t == null ? Number.NEGATIVE_INFINITY : t;
+    };
+    const lo = Math.max(1, to - Math.ceil(windowMs / MIN_BLOCK_MS));
+    let from = await firstBlockAtLeast(lo, to, targetMs, metric);
+    if (from === lo && lo > 1) from = await firstBlockAtLeast(1, to, targetMs, metric);
+    return from;
   };
   const [pFromRaw, aFromRaw] = await Promise.all([
-    pTo >= 1 ? firstBlockAtLeast(1, pTo, targetMs, timeMetric(pTs, pHashes)) : Promise.resolve(null),
-    aTo >= 1 ? firstBlockAtLeast(1, aTo, targetMs, timeMetric(aTs, aHashes)) : Promise.resolve(null),
+    locate(pTs, pHashes, pTo),
+    locate(aTs, aHashes, aTo),
   ]);
   // firstBlockAtLeast returns null only when even the newest unscanned block is older
   // than the target (nothing left in this window) → empty range via from > to.
