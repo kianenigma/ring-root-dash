@@ -301,6 +301,20 @@ export async function scanHistory(
     "DeletedIndicesAtCapacity",
   ];
   const a = acc; // non-null alias for closures
+
+  // Per-chunk staging: merges write here, and are folded into `acc` only after the
+  // whole chunk scans successfully. So an aborted chunk leaves `acc` untouched (no
+  // half-merged data, no double-counting on the next load) — each chunk is atomic.
+  const stageEvents: TimedEvent[] = [];
+  const stageRegs: HistoryAcc["registrations"] = [];
+  const stageBuilds = new Map<string, BuildRec[]>();
+  const stageUpdates = new Map<string, BuildRec[]>();
+  const pushTo = (m: Map<string, BuildRec[]>, k: string, rec: BuildRec) => {
+    const arr = m.get(k);
+    if (arr) arr.push(rec);
+    else m.set(k, [rec]);
+  };
+
   let pDone = 0;
   let aDone = 0;
   const totalBlocks = pBlocks.length + aBlocks.length;
@@ -310,40 +324,36 @@ export async function scanHistory(
         phase: "Scanning People + AH blocks",
         done: pDone + aDone,
         total: totalBlocks,
-        events: a.events.length,
+        events: a.events.length + stageEvents.length,
       });
   };
 
-  // ---- Merge raw per-block extracts into the accumulator. Filtering/attribution
+  // ---- Merge raw per-block extracts into the chunk stage. Filtering/attribution
   // uses current-session subscribed/memberRing state, so cached raw facts re-filter
   // correctly even if subscriptions or membership changed since they were cached. ----
   const mergePeople = (n: number, e: PeopleExtract) => {
     for (const key of e.added) {
       const attr = a.memberRing.get(key);
       if (!attr || !a.subscribed.has(attr.identifier)) continue;
-      a.registrations.push({ key, block: n, timeMs: e.t });
-      a.events.push({ chain: "people", block: n, timeMs: e.t, kind: "Registered", identifier: attr.identifier, detail: short(key) });
+      stageRegs.push({ key, block: n, timeMs: e.t });
+      stageEvents.push({ chain: "people", block: n, timeMs: e.t, kind: "Registered", identifier: attr.identifier, detail: short(key) });
     }
     for (const b of e.built) {
       if (!a.subscribed.has(b.id)) continue;
       const k = ringKeyStr({ identifier: b.id, ringIndex: b.ri });
-      if (!a.peopleBuilds.has(k)) a.peopleBuilds.set(k, []);
-      a.peopleBuilds.get(k)!.push({ block: n, timeMs: e.t, revision: b.rev });
-      a.events.push({ chain: "people", block: n, timeMs: e.t, kind: "RingBuilt", identifier: b.id, ringIndex: b.ri, detail: `rev ${b.rev}` });
+      pushTo(stageBuilds, k, { block: n, timeMs: e.t, revision: b.rev });
+      stageEvents.push({ chain: "people", block: n, timeMs: e.t, kind: "RingBuilt", identifier: b.id, ringIndex: b.ri, detail: `rev ${b.rev}` });
     }
     for (const id of e.onboard) {
       if (!a.subscribed.has(id)) continue;
-      a.events.push({ chain: "people", block: n, timeMs: e.t, kind: "Onboarded", identifier: id });
+      stageEvents.push({ chain: "people", block: n, timeMs: e.t, kind: "Onboarded", identifier: id });
     }
   };
   const mergeAh = (n: number, e: AhExtract) => {
     for (const ev of e.events)
-      a.events.push({ chain: "assetHub", block: n, timeMs: e.t, kind: ev.k, detail: ev.d });
-    for (const u of e.updates) {
-      const k = ringKeyStr({ identifier: u.id, ringIndex: u.ri });
-      if (!a.ahUpdates.has(k)) a.ahUpdates.set(k, []);
-      a.ahUpdates.get(k)!.push({ block: n, timeMs: e.t, revision: u.rev });
-    }
+      stageEvents.push({ chain: "assetHub", block: n, timeMs: e.t, kind: ev.k, detail: ev.d });
+    for (const u of e.updates)
+      pushTo(stageUpdates, ringKeyStr({ identifier: u.id, ringIndex: u.ri }), { block: n, timeMs: e.t, revision: u.rev });
   };
 
   // ---- Network extractors: read one block's relevant facts (the expensive path). ----
@@ -474,6 +484,22 @@ export async function scanHistory(
   );
 
   await Promise.all([peopleScan, ahScan]);
+
+  // ---- Commit the chunk atomically: fold the stage into the accumulator. Reached
+  // only if the whole chunk scanned without aborting, so `acc` never holds a
+  // half-scanned chunk. ----
+  a.events.push(...stageEvents);
+  a.registrations.push(...stageRegs);
+  for (const [k, recs] of stageBuilds) {
+    const arr = a.peopleBuilds.get(k);
+    if (arr) arr.push(...recs);
+    else a.peopleBuilds.set(k, recs);
+  }
+  for (const [k, recs] of stageUpdates) {
+    const arr = a.ahUpdates.get(k);
+    if (arr) arr.push(...recs);
+    else a.ahUpdates.set(k, recs);
+  }
 
   // ---- Persist freshly-scanned blocks + extend coverage to the iterated ranges.
   // (Skipped on abort: the throw above bypasses this, so a partial range is never

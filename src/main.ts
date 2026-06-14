@@ -423,6 +423,11 @@ function doConnect(): void {
   }
 }
 
+/** Progressive-render granularity: a load larger than this is split into chunks of
+ *  this much *time*, re-deriving + re-rendering (and persisting to cache) after each.
+ *  Loads at or below this run as a single chunk (unchanged behaviour). */
+const HISTORY_CHUNK_MS = 600_000; // 10 minutes
+
 async function doLoadHistory(windowMs: number): Promise<void> {
   if (!state.conns) {
     setStatus("Connect first.", "bad");
@@ -433,34 +438,81 @@ async function doLoadHistory(windowMs: number): Promise<void> {
   const stopBtn = document.querySelector<HTMLButtonElement>("#stop-history")!;
   const loadBtns = [...document.querySelectorAll<HTMLButtonElement>(".load-history")];
   const extending = state.historyAcc !== null;
-  state.historyAbort = new AbortController();
+  const abort = new AbortController();
+  state.historyAbort = abort;
   stopBtn.classList.remove("hidden");
   for (const b of loadBtns) b.disabled = true;
   if (!extending) {
-    // First load: show nothing until the whole window is scanned for both chains.
+    // First load: blank stale data; chunks then fill it in progressively.
     state.history = null;
     renderHistorySection();
   }
   setProgress({ phase: "Starting", done: 0, total: 1, events: 0 });
 
-  try {
-    // No acc → fresh most-recent window. With acc → extend further into the past.
-    const acc = await scanHistory(
-      conns.people,
-      conns.assetHub,
-      (p) => setProgress(p),
-      state.historyAbort.signal,
-      windowMs,
-      state.historyAcc ?? undefined,
-    );
-    state.historyAcc = acc;
-    state.history = deriveHistory(acc);
+  const chunkMs = Math.min(HISTORY_CHUNK_MS, windowMs);
+  const totalChunks = Math.max(1, Math.ceil(windowMs / chunkMs));
+  // Time floor this load must reach: `windowMs` below where scanning currently stands.
+  // Known up front for an extend; for a first load we learn the head time after the
+  // first chunk (and the cache may already carry us past it in one shot).
+  let targetFloorMs: number | null =
+    extending && state.historyAcc ? state.historyAcc.scanFloorMs - windowMs : null;
+
+  // Re-render is throttled so cache-fast chunks don't thrash the DOM; the final state
+  // is always forced. deriveHistory recomputes from the whole accumulator each time.
+  let lastRenderMs = 0;
+  const render = (force: boolean): void => {
+    if (!state.historyAcc) return;
+    const now = Date.now();
+    if (!force && now - lastRenderMs < 400) return;
+    lastRenderMs = now;
+    state.history = deriveHistory(state.historyAcc);
     renderHistorySection();
-    setStatus(
-      `History: ${state.history.registrations.length} registrations, ${state.history.rings.length} ring builds · People back to #${state.history.people.fromBlock}, AH back to #${state.history.assetHub.fromBlock}.`,
-      "ok",
-    );
+  };
+
+  try {
+    for (let i = 0; i < totalChunks; i++) {
+      if (abort.signal.aborted) throw new DOMException("aborted", "AbortError");
+      const prevP = state.historyAcc?.pMinScanned ?? Number.POSITIVE_INFINITY;
+      const prevA = state.historyAcc?.aMinScanned ?? Number.POSITIVE_INFINITY;
+      const chunkNo = i + 1;
+      const acc = await scanHistory(
+        conns.people,
+        conns.assetHub,
+        (p) =>
+          setProgress({
+            phase: totalChunks > 1 ? `Loading ${chunkNo}/${totalChunks} · ${p.phase}` : p.phase,
+            done: p.done,
+            total: p.total,
+            events: p.events,
+          }),
+        abort.signal,
+        chunkMs,
+        state.historyAcc ?? undefined,
+      );
+      state.historyAcc = acc;
+      render(false);
+
+      // Learn the overall target once the head time is known (first load).
+      if (targetFloorMs === null) {
+        const headFloor = Math.min(
+          acc.pHeadTimeMs ?? Number.POSITIVE_INFINITY,
+          acc.aHeadTimeMs ?? Number.POSITIVE_INFINITY,
+        );
+        targetFloorMs = (Number.isFinite(headFloor) ? headFloor : acc.scanFloorMs) - windowMs;
+      }
+      // Stop early if both chains hit genesis (nothing new scanned), or we/the cache
+      // have already covered the requested window.
+      const stuck = acc.pMinScanned >= prevP && acc.aMinScanned >= prevA;
+      if (stuck || acc.scanFloorMs <= targetFloorMs) break;
+    }
+    render(true);
+    if (state.history)
+      setStatus(
+        `History: ${state.history.registrations.length} registrations, ${state.history.rings.length} ring builds · People back to #${state.history.people.fromBlock}, AH back to #${state.history.assetHub.fromBlock}.`,
+        "ok",
+      );
   } catch (e) {
+    render(true); // show whatever fully-scanned chunks accumulated
     if ((e as Error).name === "AbortError") setStatus("History scan stopped.", "");
     else setStatus(`History scan failed: ${(e as Error).message}`, "bad");
   } finally {

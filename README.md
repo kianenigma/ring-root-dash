@@ -32,9 +32,12 @@ the earliest block still in the local cache (per chain), or the last hour if tha
 so a prior session's data reappears instantly and only the recent gap is fetched. You can
 then load **+1m / +10m / +1h / +6h / +1d / +1w** more, each extending further into the past
 **from the earliest block currently shown** (re-using the cache, fetching only what's
-missing). The page shows **nothing until the whole window has been scanned on both chains**
-(no partial results); a progress indicator shows how far along the scan is, and **Stop**
-cancels it. (`+1w` reads ~300k blocks per chain and can take a long while.)
+missing). Loads larger than **10 minutes** are scanned in **10-minute chunks and rendered
+progressively** — results (and the cache) update after each chunk instead of waiting for the
+whole window, so a `+1w` fills in as it goes. Each chunk is committed atomically, so **Stop**
+(or a failure) keeps every fully-scanned chunk and discards only the one in flight. A
+progress indicator shows the current chunk and block position. (`+1w` is hundreds of
+thousands of blocks per chain and can take a long while — but you see data the whole time.)
 
 It reconstructs the three-stage pipeline for every member of an **AH-subscribed collection**
 (coinage and other never-propagated collections are excluded):
