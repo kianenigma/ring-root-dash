@@ -27,11 +27,14 @@ every new finalized block; there is no manual refresh.
 
 ## History page
 
-Auto-runs a **1-hour** scan on connect; you can also load **+1m / +10m / +1h / +6h / +1d /
-+1w** more (each extends further into the past). The page shows **nothing until the whole
-window has been scanned on both chains** (no partial results); a progress indicator shows how
-far along the scan is, and **Stop** cancels it. (`+1w` reads ~300k blocks per chain and can
-take a long while.)
+On connect it shows **max(last 1 hour, whatever is already cached)** — i.e. it scans back to
+the earliest block still in the local cache (per chain), or the last hour if that's larger,
+so a prior session's data reappears instantly and only the recent gap is fetched. You can
+then load **+1m / +10m / +1h / +6h / +1d / +1w** more, each extending further into the past
+**from the earliest block currently shown** (re-using the cache, fetching only what's
+missing). The page shows **nothing until the whole window has been scanned on both chains**
+(no partial results); a progress indicator shows how far along the scan is, and **Stop**
+cancels it. (`+1w` reads ~300k blocks per chain and can take a long while.)
 
 It reconstructs the three-stage pipeline for every member of an **AH-subscribed collection**
 (coinage and other never-propagated collections are excluded):
@@ -63,9 +66,43 @@ into the PAPI explorer for the right chain. Each of the three tables has a **⤓
 Accuracy over speed: the scanner reads `System.Events` at **every block** in the window on
 both chains (concurrency is only for throughput — no block is skipped, so no event is
 missed). Timestamps are read at event blocks, and AH ring receipts are reconstructed by
-reading `RingRoots` at each AH update block. These chains are ~2s, so a full day is ~43k
-blocks per chain and can take several minutes — use 1h/6h for a quick look, and watch
-results stream in.
+reading `RingRoots` at each AH update block.
+
+Windows are **timestamp-based, not block-count-based**. People and Asset Hub run at
+different block rates, so a fixed block count per chain would drift their scanned time-spans
+apart — and a People build whose Asset Hub receipt fell in the un-scanned gap would show a
+permanent false "pending". Instead each load picks one shared wall-clock floor (`previous
+floor − window`) and binary-searches *each* chain for the first block at/after it, so both
+chains always cover the exact same time span (the faster chain simply scrapes more blocks).
+Because the full result is **re-derived from the entire accumulated dataset on every load**
+(not per-increment), a later load that fills in the Asset Hub side automatically upgrades an
+earlier "pending" to "received". A full day is tens of thousands of blocks per chain and can
+take several minutes — use 1h/6h for a quick look, and watch results stream in.
+
+### Local block cache
+
+Scanned blocks are cached in the browser's **IndexedDB** so an overlapping range — even in a
+later session — replays from disk instead of re-querying the chain. For each block the cache
+stores only the *parsed contribution* (relevant events + the ring revisions read at it);
+blocks with nothing relevant store no row but are still recorded as scanned (via a coverage
+range), so empty blocks are skipped too. Filtering/attribution is re-applied from current
+state on replay, so cached facts stay correct even if subscriptions or membership change.
+
+- **Scope** — keyed by each chain's **genesis hash**, so one network's data is never served
+  for another, and the same chain shares its cache across different RPC URLs.
+- **Coverage** — `+1d`/`+1w` scan the same ranges as before; they just skip the network read
+  for any already-cached block. Aborting a scan leaves its range *uncached* (re-scanned next
+  time), never partially marked.
+- **Stats + Clear** — the History toolbar shows the cached block count and an approximate
+  (origin-wide) size, with a **Clear cache** button that deletes the whole database.
+- **Export / Import** — **Export** downloads the whole cache (all networks) as a JSON file
+  to share; **Import** merges a file back in. Merging is always safe because only finalized
+  (immutable) blocks are cached, so two caches of the same chain can only agree — coverage
+  ranges are unioned and block rows are put by `[genesis, chain, block]`. A file from a
+  different `SCHEMA_VERSION` (or non-cache JSON) is rejected rather than misread.
+- **Invalidation** — the store is versioned by a `SCHEMA_VERSION`; bumping it (e.g. when we
+  start extracting new data) drops and recreates the database automatically — no migrations.
+  Any read/write error degrades to a cache miss and never breaks scanning.
 
 ## Setup page
 

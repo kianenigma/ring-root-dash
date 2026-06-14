@@ -12,6 +12,7 @@ import { computeInTransit, fetchAhLive, fetchPeopleLive } from "./live";
 import type { AhLive, HistoryResult, PeopleLive } from "./domain";
 import { deriveHistory, type HistoryAcc, scanHistory, type Progress } from "./history";
 import { connect, type Connections, disconnect } from "./papi";
+import { cacheStats, clearCache, exportCache, importCache } from "./cache";
 import { drawTimingChart, resizeTimingChart } from "./chart";
 import { historyCsv, type HistoryTable } from "./csv";
 import { fetchSetup, type SetupState } from "./setup";
@@ -105,6 +106,11 @@ function shell(): string {
         <button class="load-history" data-window="604800000" title="Scan 1 more week of older history. This reads every block on both chains over a week (~300k blocks/chain) and can take a long while — use Stop to cancel.">+1w</button>
         <button id="stop-history" class="hidden" title="Abort the in-progress history scan.">Stop</button>
         <span id="progress" class="progress hidden"></span>
+        <span id="cache-stat" class="cache-stat" title="Local IndexedDB cache of scanned blocks, keyed per chain (genesis). Blocks already cached are replayed from disk instead of re-querying the chain, so re-loading an overlapping range is instant. 'blocks' is how many blocks are cached across all networks; size is an approximate, origin-wide figure reported by the browser.">cache: …</span>
+        <button id="export-cache" title="Download the whole local block cache (all networks) as a JSON file you can share.">Export</button>
+        <button id="import-cache" title="Merge a previously exported cache JSON into your local cache. Only finalized (immutable) blocks are cached, so merging never conflicts. A file from a different schema version is rejected.">Import</button>
+        <input id="cache-file" type="file" accept="application/json,.json" class="hidden" />
+        <button id="clear-cache" title="Delete the entire local block cache (IndexedDB) for all networks. The next scan re-fetches from the chain.">Clear cache</button>
       </div>
       <div id="history"></div>
     </div>
@@ -245,9 +251,31 @@ function renderHistorySection(): void {
   drawTimingChart(el, state.history);
 }
 
-/** Trigger a client-side download of CSV text (with a UTF-8 BOM so Excel reads hex/labels). */
-function downloadCsv(filename: string, content: string): void {
-  const blob = new Blob(["﻿" + content], { type: "text/csv;charset=utf-8;" });
+function fmtBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${Math.round(b / 1024)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/** Refresh the cache stat readout in the History toolbar (block count + ≈ size). */
+async function refreshCacheStat(): Promise<void> {
+  const el = document.querySelector<HTMLSpanElement>("#cache-stat");
+  if (!el) return;
+  try {
+    const s = await cacheStats();
+    if (!s.available) {
+      el.textContent = "cache: unavailable";
+      return;
+    }
+    const size = s.bytes != null ? ` · ≈${fmtBytes(s.bytes)}` : "";
+    el.textContent = `cache: ${s.blocks.toLocaleString()} blocks${size}`;
+  } catch {
+    el.textContent = "cache: unavailable";
+  }
+}
+
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -256,6 +284,15 @@ function downloadCsv(filename: string, content: string): void {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+/** Trigger a client-side download of CSV text (with a UTF-8 BOM so Excel reads hex/labels). */
+function downloadCsv(filename: string, content: string): void {
+  downloadBlob(filename, new Blob(["﻿" + content], { type: "text/csv;charset=utf-8;" }));
+}
+
+function downloadJson(filename: string, obj: unknown): void {
+  downloadBlob(filename, new Blob([JSON.stringify(obj)], { type: "application/json" }));
 }
 
 function renderSetupSection(): void {
@@ -431,6 +468,7 @@ async function doLoadHistory(windowMs: number): Promise<void> {
     stopBtn.classList.add("hidden");
     for (const b of loadBtns) b.disabled = false;
     state.historyAbort = null;
+    void refreshCacheStat();
   }
 }
 
@@ -440,6 +478,44 @@ function wire(): void {
     b.addEventListener("click", () => void doLoadHistory(Number(b.getAttribute("data-window"))));
   document.querySelector("#stop-history")!.addEventListener("click", () => state.historyAbort?.abort());
   document.querySelector("#refresh-setup")!.addEventListener("click", () => void doLoadSetup());
+  document.querySelector("#clear-cache")!.addEventListener("click", () => {
+    void (async () => {
+      await clearCache();
+      await refreshCacheStat();
+      setStatus("Local block cache cleared.", "ok");
+    })();
+  });
+
+  document.querySelector("#export-cache")!.addEventListener("click", () => {
+    void (async () => {
+      const data = await exportCache();
+      if (!data || (data.blocks.length === 0 && data.coverage.length === 0)) {
+        setStatus("Cache is empty — nothing to export.", "bad");
+        return;
+      }
+      downloadJson("ring-root-cache.json", { ...data, exportedAt: Date.now() });
+      setStatus(`Exported cache: ${data.blocks.length.toLocaleString()} block row(s).`, "ok");
+    })();
+  });
+
+  const cacheFile = document.querySelector<HTMLInputElement>("#cache-file")!;
+  document.querySelector("#import-cache")!.addEventListener("click", () => cacheFile.click());
+  cacheFile.addEventListener("change", () => {
+    void (async () => {
+      const file = cacheFile.files?.[0];
+      if (!file) return;
+      try {
+        const res = await importCache(JSON.parse(await file.text()));
+        if (!res.ok) setStatus(`Import failed: ${res.reason}`, "bad");
+        else setStatus(`Imported ${res.blocksAdded.toLocaleString()} block row(s) into the cache.`, "ok");
+        await refreshCacheStat();
+      } catch (e) {
+        setStatus(`Import failed: ${(e as Error).message}`, "bad");
+      } finally {
+        cacheFile.value = ""; // allow re-importing the same file
+      }
+    })();
+  });
 
   for (const tab of document.querySelectorAll<HTMLElement>(".tab"))
     tab.addEventListener("click", () => setPage(tab.getAttribute("data-page") as AppState["page"]));
@@ -499,4 +575,5 @@ const matching = PRESETS.find(
 );
 if (matching) document.querySelector<HTMLSelectElement>("#preset")!.value = matching.name;
 wire();
+void refreshCacheStat();
 doConnect();

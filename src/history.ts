@@ -14,8 +14,17 @@
 // are re-derived from the combined raw data. Everything is labeled by both block
 // number and timestamp.
 
+import {
+  type AhExtract,
+  coveredBy,
+  loadCoverage,
+  loadRange,
+  type PeopleExtract,
+  type Range,
+  saveRange,
+} from "./cache";
 import { HISTORY_WINDOW_MS } from "./config";
-import { HashCache } from "./chainio";
+import { firstBlockAtLeast, HashCache } from "./chainio";
 import type {
   HistoryResult,
   RegistrationDelay,
@@ -25,6 +34,9 @@ import type {
 } from "./domain";
 import { ringKeyStr } from "./domain";
 import type { AhApi, ChainConn, PeopleApi } from "./papi";
+
+const EMPTY_PEOPLE: PeopleExtract = { t: null, added: [], built: [], onboard: [] };
+const EMPTY_AH: AhExtract = { t: null, events: [], updates: [] };
 
 type Hex = `0x${string}`;
 
@@ -59,8 +71,10 @@ export interface HistoryAcc {
   aHead: number;
   pHeadTimeMs: number | null;
   aHeadTimeMs: number | null;
-  pBlockMs: number;
-  aBlockMs: number;
+  /** Oldest wall-clock time (ms) scanned so far, shared by both chains. Each load
+   *  extends this by `windowMs` and scans *both* chains down to it, so the two
+   *  chains stay time-aligned regardless of their (differing) block rates. */
+  scanFloorMs: number;
   /** Earliest scanned block (inclusive); next load goes below this. */
   pMinScanned: number;
   aMinScanned: number;
@@ -68,6 +82,13 @@ export interface HistoryAcc {
   aMinTimeMs: number | null;
   scannedPeople: number;
   scannedAh: number;
+  /** Chain genesis hashes — the cache scope key. Null if they couldn't be read. */
+  pGenesis: string | null;
+  aGenesis: string | null;
+  /** Timestamp (ms) of the earliest cached block per chain at connect time, so the
+   *  first load can show max(default window, cached extent). Null if nothing cached. */
+  pCachedFromTimeMs: number | null;
+  aCachedFromTimeMs: number | null;
 }
 
 /** Bounded-concurrency map that still visits every item; honors abort. */
@@ -111,16 +132,6 @@ async function tsAt(
   }
 }
 
-async function blockTimeMs(
-  read: (h: Hex) => Promise<bigint>,
-  hashes: HashCache,
-  head: number,
-): Promise<number> {
-  const sample = Math.min(500, Math.max(1, head - 1));
-  const [a, b] = await Promise.all([tsAt(read, hashes, head), tsAt(read, hashes, head - sample)]);
-  return a && b && a > b ? (a - b) / sample : 6000;
-}
-
 // A raw decoded event row from System.Events: { phase, event, topics }.
 type RawEvent = { event: { type: string; value: { type: string; value: unknown } } };
 
@@ -151,6 +162,7 @@ export async function scanHistory(
   windowMs: number = HISTORY_WINDOW_MS,
   acc?: HistoryAcc,
 ): Promise<HistoryAcc> {
+  const isFirstLoad = acc === undefined;
   const pHashes = hashCacheFor(people.client, pHashCaches, () => new HashCache(people.client));
   const aHashes = hashCacheFor(assetHub.client, aHashCaches, () => new HashCache(assetHub.client));
   const pTs = (h: Hex) => people.api.query.Timestamp.Now.getValue({ at: h });
@@ -163,11 +175,11 @@ export async function scanHistory(
       people.client.getFinalizedBlock(),
       assetHub.client.getFinalizedBlock(),
     ]);
-    const [pBlockMs, aBlockMs, pHeadTimeMs, aHeadTimeMs] = await Promise.all([
-      blockTimeMs(pTs, pHashes, pHead.number),
-      blockTimeMs(aTs, aHashes, aHead.number),
+    const [pHeadTimeMs, aHeadTimeMs, pGenesis, aGenesis] = await Promise.all([
       tsAt(pTs, pHashes, pHead.number),
       tsAt(aTs, aHashes, aHead.number),
+      people.client._request<string>("chain_getBlockHash", [0]).catch(() => null),
+      assetHub.client._request<string>("chain_getBlockHash", [0]).catch(() => null),
     ]);
 
     const subscribed = new Set<string>();
@@ -195,6 +207,27 @@ export async function scanHistory(
       notes.push(`Could not read current Members for attribution: ${(err as Error).message}`);
     }
 
+    // Earliest already-cached block per chain → its timestamp, so the first load
+    // can show max(default window, cached extent) instead of just the default window.
+    const [pCov, aCov] = await Promise.all([
+      loadCoverage(pGenesis, "people"),
+      loadCoverage(aGenesis, "assetHub"),
+    ]);
+    const earliestOf = (rs: Range[]): number | null => (rs.length ? Math.min(...rs.map((r) => r[0])) : null);
+    const pCachedFrom = earliestOf(pCov);
+    const aCachedFrom = earliestOf(aCov);
+    const [pCachedFromTimeMs, aCachedFromTimeMs] = await Promise.all([
+      pCachedFrom != null ? tsAt(pTs, pHashes, pCachedFrom) : Promise.resolve(null),
+      aCachedFrom != null ? tsAt(aTs, aHashes, aCachedFrom) : Promise.resolve(null),
+    ]);
+
+    // Both chains scan down to a shared wall-clock floor; start it at the (older of
+    // the two) head times so a 1h window means 1h on both, not "N blocks each".
+    const headFloor = Math.min(
+      pHeadTimeMs ?? Number.POSITIVE_INFINITY,
+      aHeadTimeMs ?? Number.POSITIVE_INFINITY,
+    );
+
     acc = {
       subscribed,
       memberRing,
@@ -208,22 +241,50 @@ export async function scanHistory(
       aHead: aHead.number,
       pHeadTimeMs,
       aHeadTimeMs,
-      pBlockMs,
-      aBlockMs,
+      scanFloorMs: Number.isFinite(headFloor) ? headFloor : Date.now(),
       pMinScanned: pHead.number + 1, // nothing scanned yet
       aMinScanned: aHead.number + 1,
       pMinTimeMs: pHeadTimeMs,
       aMinTimeMs: aHeadTimeMs,
       scannedPeople: 0,
       scannedAh: 0,
+      pGenesis,
+      aGenesis,
+      pCachedFromTimeMs,
+      aCachedFromTimeMs,
     };
   }
 
-  // ---- Determine the block range for this scan ----
+  // ---- Determine the block range for this scan, by TIMESTAMP (not block count) ----
+  // Both chains run at different block rates, so a fixed block count per chain drifts
+  // their scanned time-windows apart — a People build can then fall in a time band the
+  // AH side never scanned, showing a permanent false "pending". Instead we pick one
+  // shared wall-clock floor and binary-search each chain for the first block at/after
+  // it, so both chains always cover the same time span.
+  onProgress({ phase: "Locating window", done: 0, total: 1, events: 0 });
+  let targetMs = acc.scanFloorMs - windowMs;
+  // First load shows max(default window, cached extent): pull the floor down to the
+  // oldest cached block's time so prior scans reappear instantly (gaps are re-fetched).
+  if (isFirstLoad) {
+    if (acc.pCachedFromTimeMs != null) targetMs = Math.min(targetMs, acc.pCachedFromTimeMs);
+    if (acc.aCachedFromTimeMs != null) targetMs = Math.min(targetMs, acc.aCachedFromTimeMs);
+  }
+  targetMs = Math.max(0, targetMs);
+
   const pTo = acc.pMinScanned - 1; // one below the earliest already scanned (or head on first load)
   const aTo = acc.aMinScanned - 1;
-  const pFrom = Math.max(1, pTo - Math.floor(windowMs / acc.pBlockMs) + 1);
-  const aFrom = Math.max(1, aTo - Math.floor(windowMs / acc.aBlockMs) + 1);
+  const timeMetric = (read: (h: Hex) => Promise<bigint>, hashes: HashCache) => async (n: number) => {
+    const t = await tsAt(read, hashes, n);
+    return t == null ? Number.NEGATIVE_INFINITY : t;
+  };
+  const [pFromRaw, aFromRaw] = await Promise.all([
+    pTo >= 1 ? firstBlockAtLeast(1, pTo, targetMs, timeMetric(pTs, pHashes)) : Promise.resolve(null),
+    aTo >= 1 ? firstBlockAtLeast(1, aTo, targetMs, timeMetric(aTs, aHashes)) : Promise.resolve(null),
+  ]);
+  // firstBlockAtLeast returns null only when even the newest unscanned block is older
+  // than the target (nothing left in this window) → empty range via from > to.
+  const pFrom = pFromRaw ?? pTo + 1;
+  const aFrom = aFromRaw ?? aTo + 1;
   const pBlocks = pTo >= 1 && pFrom <= pTo ? range(pFrom, pTo) : [];
   const aBlocks = aTo >= 1 && aFrom <= aTo ? range(aFrom, aTo) : [];
   if (pBlocks.length === 0 && aBlocks.length === 0) {
@@ -253,64 +314,137 @@ export async function scanHistory(
       });
   };
 
+  // ---- Merge raw per-block extracts into the accumulator. Filtering/attribution
+  // uses current-session subscribed/memberRing state, so cached raw facts re-filter
+  // correctly even if subscriptions or membership changed since they were cached. ----
+  const mergePeople = (n: number, e: PeopleExtract) => {
+    for (const key of e.added) {
+      const attr = a.memberRing.get(key);
+      if (!attr || !a.subscribed.has(attr.identifier)) continue;
+      a.registrations.push({ key, block: n, timeMs: e.t });
+      a.events.push({ chain: "people", block: n, timeMs: e.t, kind: "Registered", identifier: attr.identifier, detail: short(key) });
+    }
+    for (const b of e.built) {
+      if (!a.subscribed.has(b.id)) continue;
+      const k = ringKeyStr({ identifier: b.id, ringIndex: b.ri });
+      if (!a.peopleBuilds.has(k)) a.peopleBuilds.set(k, []);
+      a.peopleBuilds.get(k)!.push({ block: n, timeMs: e.t, revision: b.rev });
+      a.events.push({ chain: "people", block: n, timeMs: e.t, kind: "RingBuilt", identifier: b.id, ringIndex: b.ri, detail: `rev ${b.rev}` });
+    }
+    for (const id of e.onboard) {
+      if (!a.subscribed.has(id)) continue;
+      a.events.push({ chain: "people", block: n, timeMs: e.t, kind: "Onboarded", identifier: id });
+    }
+  };
+  const mergeAh = (n: number, e: AhExtract) => {
+    for (const ev of e.events)
+      a.events.push({ chain: "assetHub", block: n, timeMs: e.t, kind: ev.k, detail: ev.d });
+    for (const u of e.updates) {
+      const k = ringKeyStr({ identifier: u.id, ringIndex: u.ri });
+      if (!a.ahUpdates.has(k)) a.ahUpdates.set(k, []);
+      a.ahUpdates.get(k)!.push({ block: n, timeMs: e.t, revision: u.rev });
+    }
+  };
+
+  // ---- Network extractors: read one block's relevant facts (the expensive path). ----
+  const fetchPeople = async (n: number): Promise<PeopleExtract | null> => {
+    const h = (await pHashes.hashAt(n)) as Hex | null;
+    if (!h) return null;
+    let recs: RawEvent[];
+    try {
+      recs = (await people.api.query.System.Events.getValue({ at: h })) as unknown as RawEvent[];
+    } catch {
+      return null;
+    }
+    const relevant = recs.filter(
+      (r) =>
+        r.event.type === "Members" &&
+        ["MemberAdded", "RingBuilt", "MembersOnboarded"].includes(r.event.value.type),
+    );
+    if (relevant.length === 0) return EMPTY_PEOPLE;
+    const timeMs = await tsAt(pTs, pHashes, n);
+    const added: string[] = [];
+    const built: Array<{ id: string; ri: number; rev: number }> = [];
+    const onboard: string[] = [];
+    for (const r of relevant) {
+      const v = r.event.value;
+      if (v.type === "MemberAdded") {
+        added.push(asHex((v.value as { key: unknown }).key));
+      } else if (v.type === "RingBuilt") {
+        const o = v.value as { identifier: unknown; ring_index: number };
+        let revision = 0;
+        try {
+          const root = await people.api.query.Members.Root.getValue(o.identifier as never, o.ring_index, { at: h });
+          if (root) revision = root.revision;
+        } catch {
+          /* leave 0 */
+        }
+        built.push({ id: asHex(o.identifier), ri: o.ring_index, rev: revision });
+      } else if (v.type === "MembersOnboarded") {
+        onboard.push(asHex((v.value as { identifier: unknown }).identifier));
+      }
+    }
+    return { t: timeMs, added, built, onboard };
+  };
+  const fetchAh = async (n: number): Promise<AhExtract | null> => {
+    const h = (await aHashes.hashAt(n)) as Hex | null;
+    if (!h) return null;
+    let recs: RawEvent[];
+    try {
+      recs = (await assetHub.api.query.System.Events.getValue({ at: h })) as unknown as RawEvent[];
+    } catch {
+      return null;
+    }
+    const relevant = recs.filter(
+      (r) => r.event.type === "MembersSubscriber" && ahKinds.includes(r.event.value.type),
+    );
+    if (relevant.length === 0) return EMPTY_AH;
+    const timeMs = await tsAt(aTs, aHashes, n);
+    let ringChanging = false;
+    const events: Array<{ k: string; d: string }> = [];
+    for (const r of relevant) {
+      const v = r.event.value;
+      if (v.type === "RingRootsUpdated" || v.type === "RingRootsInitialized") ringChanging = true;
+      events.push({ k: v.type, d: detailOf(v.value) });
+    }
+    const updates: Array<{ id: string; ri: number; rev: number }> = [];
+    if (ringChanging) {
+      try {
+        for (const e of await assetHub.api.query.MembersSubscriber.RingRoots.getEntries({ at: h })) {
+          const rev = e.value.reduce((m, rec) => Math.max(m, rec.revision), -1);
+          updates.push({ id: e.keyArgs[0].asHex(), ri: e.keyArgs[1], rev });
+        }
+      } catch {
+        /* skip this block's storage read */
+      }
+    }
+    return { t: timeMs, events, updates };
+  };
+
+  const hasPeople = (e: PeopleExtract) => e.added.length + e.built.length + e.onboard.length > 0;
+  const hasAh = (e: AhExtract) => e.events.length > 0;
+
+  // ---- Preload the cache for the ranges about to be scanned (one read per chain). ----
+  const [pCache, aCache] = await Promise.all([
+    pBlocks.length ? loadRange(a.pGenesis, "people", pFrom, pTo) : null,
+    aBlocks.length ? loadRange(a.aGenesis, "assetHub", aFrom, aTo) : null,
+  ]);
+  const pWrite = new Map<number, PeopleExtract>();
+  const aWrite = new Map<number, AhExtract>();
+
   const peopleScan = pool(
     pBlocks,
     CONCURRENCY,
     async (n) => {
-      const h = (await pHashes.hashAt(n)) as Hex | null;
-      if (!h) return;
-      let recs: RawEvent[];
-      try {
-        recs = (await people.api.query.System.Events.getValue({ at: h })) as unknown as RawEvent[];
-      } catch {
-        return;
+      let e: PeopleExtract | null;
+      if (pCache && coveredBy(pCache.ranges, n)) {
+        // Covered already: a stored row, or (no row) a scanned-but-empty block.
+        e = (pCache.blocks.get(n) as PeopleExtract | undefined) ?? EMPTY_PEOPLE;
+      } else {
+        e = await fetchPeople(n);
+        if (e && hasPeople(e)) pWrite.set(n, e);
       }
-      const relevant = recs.filter(
-        (r) =>
-          r.event.type === "Members" &&
-          ["MemberAdded", "RingBuilt", "MembersOnboarded"].includes(r.event.value.type),
-      );
-      if (relevant.length === 0) return;
-      const timeMs = await tsAt(pTs, pHashes, n);
-      for (const r of relevant) {
-        const v = r.event.value;
-        if (v.type === "MemberAdded") {
-          const key = asHex((v.value as { key: unknown }).key);
-          const attr = a.memberRing.get(key);
-          if (!attr || !a.subscribed.has(attr.identifier)) continue;
-          a.registrations.push({ key, block: n, timeMs });
-          a.events.push({
-            chain: "people",
-            block: n,
-            timeMs,
-            kind: "Registered",
-            identifier: attr.identifier,
-            detail: short(key),
-          });
-        } else if (v.type === "RingBuilt") {
-          const o = v.value as { identifier: unknown; ring_index: number };
-          const identifier = asHex(o.identifier);
-          if (!a.subscribed.has(identifier)) continue;
-          const ringIndex = o.ring_index;
-          let revision = 0;
-          try {
-            const root = await people.api.query.Members.Root.getValue(o.identifier as never, ringIndex, {
-              at: h,
-            });
-            if (root) revision = root.revision;
-          } catch {
-            /* leave 0 */
-          }
-          const k = ringKeyStr({ identifier, ringIndex });
-          if (!a.peopleBuilds.has(k)) a.peopleBuilds.set(k, []);
-          a.peopleBuilds.get(k)!.push({ block: n, timeMs, revision });
-          a.events.push({ chain: "people", block: n, timeMs, kind: "RingBuilt", identifier, ringIndex, detail: `rev ${revision}` });
-        } else if (v.type === "MembersOnboarded") {
-          const identifier = asHex((v.value as { identifier: unknown }).identifier);
-          if (!a.subscribed.has(identifier)) continue;
-          a.events.push({ chain: "people", block: n, timeMs, kind: "Onboarded", identifier });
-        }
-      }
+      if (e) mergePeople(n, e);
     },
     () => {
       pDone++;
@@ -323,37 +457,14 @@ export async function scanHistory(
     aBlocks,
     CONCURRENCY,
     async (n) => {
-      const h = (await aHashes.hashAt(n)) as Hex | null;
-      if (!h) return;
-      let recs: RawEvent[];
-      try {
-        recs = (await assetHub.api.query.System.Events.getValue({ at: h })) as unknown as RawEvent[];
-      } catch {
-        return;
+      let e: AhExtract | null;
+      if (aCache && coveredBy(aCache.ranges, n)) {
+        e = (aCache.blocks.get(n) as AhExtract | undefined) ?? EMPTY_AH;
+      } else {
+        e = await fetchAh(n);
+        if (e && hasAh(e)) aWrite.set(n, e);
       }
-      const relevant = recs.filter(
-        (r) => r.event.type === "MembersSubscriber" && ahKinds.includes(r.event.value.type),
-      );
-      if (relevant.length === 0) return;
-      const timeMs = await tsAt(aTs, aHashes, n);
-      let ringChanging = false;
-      for (const r of relevant) {
-        const v = r.event.value;
-        if (v.type === "RingRootsUpdated" || v.type === "RingRootsInitialized") ringChanging = true;
-        a.events.push({ chain: "assetHub", block: n, timeMs, kind: v.type, detail: detailOf(v.value) });
-      }
-      if (ringChanging) {
-        try {
-          for (const e of await assetHub.api.query.MembersSubscriber.RingRoots.getEntries({ at: h })) {
-            const k = ringKeyStr({ identifier: e.keyArgs[0].asHex(), ringIndex: e.keyArgs[1] });
-            const rev = e.value.reduce((m, rec) => Math.max(m, rec.revision), -1);
-            if (!a.ahUpdates.has(k)) a.ahUpdates.set(k, []);
-            a.ahUpdates.get(k)!.push({ block: n, timeMs, revision: rev });
-          }
-        } catch {
-          /* skip this block's storage read */
-        }
-      }
+      if (e) mergeAh(n, e);
     },
     () => {
       aDone++;
@@ -364,7 +475,17 @@ export async function scanHistory(
 
   await Promise.all([peopleScan, ahScan]);
 
+  // ---- Persist freshly-scanned blocks + extend coverage to the iterated ranges.
+  // (Skipped on abort: the throw above bypasses this, so a partial range is never
+  // marked covered and will be re-scanned next time.) ----
+  await Promise.all([
+    pBlocks.length ? saveRange(a.pGenesis, "people", pFrom, pTo, pWrite) : null,
+    aBlocks.length ? saveRange(a.aGenesis, "assetHub", aFrom, aTo, aWrite) : null,
+  ]);
+
   // ---- Merge coverage + snapshot the new earliest boundary ----
+  // Advance the shared time floor so the next load extends another window below it.
+  acc.scanFloorMs = targetMs;
   if (pBlocks.length) {
     acc.pMinScanned = pFrom;
     acc.scannedPeople += pBlocks.length;
