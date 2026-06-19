@@ -371,6 +371,13 @@ footer code { color: var(--text); }
 .metric-card .v { font-size: 28px; font-weight: 600; line-height: 1.1; }
 .metric-source { font-size: 10px; color: var(--muted); opacity: 0.85; word-break: break-word; }
 .metric-chart { position: relative; height: 96px; margin-top: 4px; }
+.stats-table-wrap { overflow-x: auto; }
+table.stats-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.stats-table th, table.stats-table td { padding: 5px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+table.stats-table th:first-child, table.stats-table td:first-child,
+table.stats-table th:nth-child(2), table.stats-table td:nth-child(2) { text-align: left; }
+table.stats-table thead th { color: var(--muted); font-weight: 500; }
+table.stats-table tbody tr:hover { background: var(--panel-2); }
 
 /* Discoverability for tooltips (standard HTML title attributes). */
 th[title], .card[title], .metric-card[title], h2[title], h3[title], .controls label[title] { cursor: help; }

@@ -58,6 +58,10 @@ export interface StorageMetric {
   sampleConcurrency: number;
   /** Don't re-read the live (tip) value more often than this (expensive reads). */
   liveEveryMs: number;
+  /** If set, ALSO sample at every block where this event metric fired (and the block
+   *  before), so the curve shows the step caused by each occurrence — e.g. an airdrop
+   *  pot sampled at each PrizeClaimed so every claim's drawdown is visible. */
+  claimEventKey?: string;
 }
 
 export const EVENT_METRICS: EventMetric[] = [
@@ -121,13 +125,48 @@ function asText(v: { asText?: () => string } | undefined): string {
   }
 }
 
+type At = Hex | "finalized" | "best";
+
+/** Find the CASH asset entry (id + metadata) on People, or null if it doesn't exist yet. */
+async function findCash(people: ChainConn<PeopleApi>, at: At) {
+  const metas = await people.api.query.Assets.Metadata.getEntries({ at });
+  return metas.find((e) => asText(e.value.symbol) === "CASH") ?? null;
+}
+
 /** Count CASH-asset holders: the `accounts` field of the CASH asset on People. */
 async function readCashHolders(people: ChainConn<PeopleApi>, at: Hex): Promise<number> {
-  const metas = await people.api.query.Assets.Metadata.getEntries({ at });
-  const cash = metas.find((e) => asText(e.value.symbol) === "CASH");
+  const cash = await findCash(people, at);
   if (!cash) return 0;
   const details = await people.api.query.Assets.Asset.getValue(cash.keyArgs[0] as never, { at });
   return details ? details.accounts : 0;
+}
+
+// PalletId-derived accounts: b"modl" ++ <PalletId> ++ zero-pad (into_account_truncating).
+// Stable, derived from the runtime config; precomputed SS58 (prefix 0).
+//   AIRDROP_POT  = PalletId(b"pop/adrp")  — airdrop prize pot; claims pay out from here.
+//   GAME_POT     = PalletId(b"pop/gads")  — Game's AirdropSource; funds airdrop events.
+const AIRDROP_POT = "13UVJyLnb49c39mEq3CGUKu1AAvvCHQQnZjvzxiS5x1dXAwd";
+const GAME_POT = "13UVJyLnb49c3LQ4gkmVNzmnDGJUGknNTRKGmRwNwTE555MG";
+
+/** Total CASH an account controls, in whole CASH units = free (Assets.Account.balance)
+ *  + held (AssetsHolder.BalancesOnHold). Prize money is HELD against the pot until a
+ *  winner claims (claim does release→transfer, so free nets ~unchanged and only the
+ *  held portion drains) — so total is what actually reflects each claim. */
+function makePotReader(account: string) {
+  return async (people: ChainConn<PeopleApi>, at: Hex): Promise<number> => {
+    const cash = await findCash(people, at);
+    if (!cash) return 0;
+    const id = cash.keyArgs[0] as never;
+    const acct = await people.api.query.Assets.Account.getValue(id, account, { at });
+    const free = acct ? acct.balance : 0n;
+    let held = 0n;
+    try {
+      held = (await people.api.query.AssetsHolder.BalancesOnHold.getValue(id, account, { at })) ?? 0n;
+    } catch {
+      // AssetsHolder may be absent at very old blocks; treat as no holds.
+    }
+    return Number(free + held) / 10 ** cash.value.decimals;
+  };
 }
 
 export const STORAGE_METRICS: StorageMetric[] = [
@@ -142,12 +181,98 @@ export const STORAGE_METRICS: StorageMetric[] = [
     sampleConcurrency: 8,
     liveEveryMs: 0, // refresh tip every block
   },
+  {
+    key: "airdropPot",
+    label: "CASH in airdrop pot",
+    source: "free+held CASH @ pop/adrp",
+    description: "CASH left in the airdrop prize pot (PalletId pop/adrp) — free + held; prize money still to be paid out. Sampled at every airdrop claim so each claim's drawdown shows.",
+    chain: "people",
+    read: makePotReader(AIRDROP_POT),
+    sampleStepBlocks: 200,
+    sampleConcurrency: 8,
+    liveEveryMs: 0, // refresh tip every block
+    claimEventKey: "airdropPrizes", // also sample at each PrizeClaimed block
+  },
+  {
+    key: "gamePot",
+    label: "CASH in game pot",
+    source: "free+held CASH @ pop/gads",
+    description: "CASH in the Game pallet's airdrop-source account (PalletId pop/gads) — free + held; funds airdrop events.",
+    chain: "people",
+    read: makePotReader(GAME_POT),
+    sampleStepBlocks: 200,
+    sampleConcurrency: 8,
+    liveEveryMs: 0,
+  },
 ];
 
 export const ALL_METRIC_KEYS = [
   ...EVENT_METRICS.map((m) => m.key),
   ...STORAGE_METRICS.map((m) => m.key),
 ];
+
+// ---------------- airdrop events (per-game prize registrations) ----------------
+
+/** One row of the airdrop-events panel: a per-game airdrop event with its registered
+ *  prize and live status. Sourced from `Airdrop.Events` storage on People. */
+export interface AirdropEventRow {
+  /** Game index this airdrop belongs to (decoded from the event id), or null. */
+  gameIndex: number | null;
+  eventId: string;
+  /** Status variant name (Scheduled / Registering / DrawWinners / Claiming / …). */
+  status: string;
+  participants: number | null;
+  effectiveWinners: number | null;
+  claimed: number | null;
+  /** Prize per winner, in whole CASH. */
+  prizePerWinner: number;
+  maxWinners: number;
+  /** Total registered prize pool = prizePerWinner × maxWinners, in CASH. */
+  totalPool: number;
+  /** CASH paid out so far = claimed × prizePerWinner (null if not in a claiming phase). */
+  claimedCash: number | null;
+  winnerCapPpm: number;
+  /** Unix seconds. */
+  regStarts: number;
+  drawTime: number;
+  endTime: number;
+}
+
+/** Read the active airdrop events (one per game) with their registered prizes. Live
+ *  snapshot from `Airdrop.Events` storage — completed events are removed by the chain. */
+async function fetchAirdropEvents(people: ChainConn<PeopleApi>): Promise<AirdropEventRow[]> {
+  const cash = await findCash(people, "finalized");
+  const dec = cash ? cash.value.decimals : 6;
+  const entries = await people.api.query.Airdrop.Events.getEntries({ at: "finalized" });
+  const rows = entries.map((e): AirdropEventRow => {
+    const idHex = e.keyArgs[0].asHex();
+    const gameIndex = Number.parseInt(idHex.slice(-8), 16); // last 4 bytes, big-endian
+    const info = e.value.info;
+    const prize = info.prize;
+    const st = e.value.status as { type: string; value?: Record<string, unknown> };
+    const v = (st.value ?? {}) as Record<string, number>;
+    const perWinner = Number(prize.asset_amount) / 10 ** dec;
+    const claimed = typeof v.claimed === "number" ? v.claimed : null;
+    return {
+      gameIndex: Number.isFinite(gameIndex) ? gameIndex : null,
+      eventId: idHex,
+      status: st.type,
+      participants: typeof v.total_participants === "number" ? v.total_participants : null,
+      effectiveWinners: typeof v.effective_winners === "number" ? v.effective_winners : null,
+      claimed,
+      prizePerWinner: perWinner,
+      maxWinners: prize.max_winners,
+      totalPool: (Number(prize.asset_amount) * prize.max_winners) / 10 ** dec,
+      claimedCash: claimed != null ? claimed * perWinner : null,
+      winnerCapPpm: prize.winner_cap,
+      regStarts: Number(info.registration_starts),
+      drawTime: Number(info.draw_time),
+      endTime: Number(info.end_time),
+    };
+  });
+  rows.sort((a, b) => (b.gameIndex ?? -1) - (a.gameIndex ?? -1));
+  return rows;
+}
 
 // ---------------- scan state ----------------
 
@@ -172,6 +297,8 @@ export interface StatsState {
   samples: Map<string, Map<number, { t: number | null; v: number }>>;
   /** metricKey → last wall-clock ms a live (tip) sample was taken. */
   lastSampledAt: Map<string, number>;
+  /** Live airdrop events (per-game prize registrations), refreshed each sync. */
+  airdropEvents: AirdropEventRow[];
   notes: string[];
 }
 
@@ -373,14 +500,32 @@ function sampleHeights(from: number, to: number, step: number): number[] {
   return [...set].sort((a, b) => a - b);
 }
 
+/** Full sample heights for a metric: the fixed grid, plus — if it tracks a claim
+ *  event — every block that event fired in (and the block before), so each occurrence
+ *  shows as a step in the curve. */
+function metricHeights(metric: StorageMetric, win: ChainWindow, state: StatsState): number[] {
+  const set = new Set<number>(sampleHeights(win.startBlock, win.tip, metric.sampleStepBlocks));
+  if (metric.claimEventKey) {
+    const blocks = metric.chain === "people" ? state.pBlocks : state.aBlocks;
+    for (const [n, e] of blocks) {
+      if (n < win.startBlock || n > win.tip) continue;
+      if ((e.c[metric.claimEventKey] ?? 0) > 0) {
+        set.add(n);
+        if (n - 1 >= win.startBlock) set.add(n - 1);
+      }
+    }
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
 /** How many uncached samples this metric needs (for the progress total). */
 function pendingSampleCount(
   metric: StorageMetric,
   win: ChainWindow,
   series: Map<number, { t: number | null; v: number }> | undefined,
+  state: StatsState,
 ): number {
-  const heights = sampleHeights(win.startBlock, win.tip, metric.sampleStepBlocks);
-  return heights.filter((n) => n === win.tip || !series?.has(n)).length;
+  return metricHeights(metric, win, state).filter((n) => n === win.tip || !series?.has(n)).length;
 }
 
 /** Backfill + refresh a storage metric's samples. Reads the live (tip) value FIRST
@@ -426,7 +571,7 @@ async function syncStorageMetric(
   await sampleAt(win.tip);
   onPartial?.();
 
-  const heights = sampleHeights(win.startBlock, win.tip, metric.sampleStepBlocks).filter(
+  const heights = metricHeights(metric, win, state).filter(
     (n) => n !== win.tip && !seriesRef.has(n),
   );
   let lastPartial = Date.now();
@@ -477,6 +622,7 @@ export async function syncStats(
         aCovered: [],
         samples: new Map(),
         lastSampledAt: new Map(),
+        airdropEvents: [],
         notes: [],
       };
     })());
@@ -562,7 +708,7 @@ export async function syncStats(
       state.samples.set(m.key, await loadSamples(state.people.genesis, "people", m.key));
   }
   const sampleTotal = due.reduce(
-    (s, m) => s + pendingSampleCount(m, state.people, state.samples.get(m.key)),
+    (s, m) => s + pendingSampleCount(m, state.people, state.samples.get(m.key), state),
     0,
   );
   let sampleDone = 0;
@@ -575,6 +721,13 @@ export async function syncStats(
   const renderPartial = onPartial ? () => onPartial(state) : undefined;
   for (const metric of due) {
     await syncStorageMetric(conns.people, metric, state.people, state, nowMs, sampleTick, renderPartial, signal);
+  }
+
+  // Airdrop events (per-game prize registrations) — cheap live snapshot.
+  try {
+    state.airdropEvents = await fetchAirdropEvents(conns.people);
+  } catch {
+    // keep previous on a transient failure
   }
 
   return state;
@@ -607,6 +760,7 @@ export interface StatsResult {
   scannedPeople: number;
   scannedAh: number;
   metrics: MetricResult[];
+  airdropEvents: AirdropEventRow[];
   notes: string[];
   inProgress: boolean;
 }
@@ -687,6 +841,7 @@ export function deriveStats(state: StatsState, inProgress: boolean): StatsResult
     scannedPeople: state.pCovered.reduce((s, [f, t]) => s + (t - f + 1), 0),
     scannedAh: state.aCovered.reduce((s, [f, t]) => s + (t - f + 1), 0),
     metrics,
+    airdropEvents: state.airdropEvents,
     notes: state.notes,
     inProgress,
   };
