@@ -7,12 +7,21 @@
 // (one snapshot on connect, manual refresh).
 
 import "./styles.css";
-import { type Endpoints, loadEndpoints, papiConsoleUrl, PRESETS, saveEndpoints } from "./config";
+import { type Endpoints, isSummit, loadEndpoints, papiConsoleUrl, PRESETS, saveEndpoints } from "./config";
 import { computeInTransit, fetchAhLive, fetchPeopleLive } from "./live";
 import type { AhLive, HistoryResult, PeopleLive } from "./domain";
 import { deriveHistory, type HistoryAcc, scanHistory, type Progress } from "./history";
 import { connect, type Connections, disconnect } from "./papi";
 import { cacheStats, clearCache, exportCache, importCache } from "./cache";
+import {
+  deriveStats,
+  type StatsProgress,
+  type StatsResult,
+  type StatsState,
+  syncStats,
+} from "./stats";
+import { renderStats } from "./statsui";
+import { destroyMetricCharts, drawMetricChart } from "./statschart";
 import {
   closeTimingChartModal,
   drawTimingChart,
@@ -48,7 +57,16 @@ interface AppState {
   setup: SetupState | null;
   /** Guards against overlapping setup fetches (refresh spam). */
   setupBusy: boolean;
-  page: "live" | "history" | "setup";
+  /** Summit usage stats (summit network only). */
+  stats: StatsState | null;
+  statsResult: StatsResult | null;
+  statsBusy: boolean;
+  statsAbort: AbortController | null;
+  /** Whether the stats scan has been auto-started for the current connection. */
+  statsAutoStarted: boolean;
+  /** Throttle for incremental stats syncs triggered by finalized blocks. */
+  statsLastSync: number;
+  page: "live" | "history" | "setup" | "stats";
   /** Per-table collapse/filter state, keyed by table id; survives live re-renders. */
   tableUi: Map<string, { collapsed: boolean; filter: string }>;
 }
@@ -67,6 +85,12 @@ const state: AppState = {
   historyAutoStarted: false,
   setup: null,
   setupBusy: false,
+  stats: null,
+  statsResult: null,
+  statsBusy: false,
+  statsAbort: null,
+  statsAutoStarted: false,
+  statsLastSync: 0,
   page: "live",
   tableUi: new Map(),
 };
@@ -90,6 +114,7 @@ function shell(): string {
       <button class="tab active" data-page="live" title="Current state, read live from chain storage on every finalized block.">Live</button>
       <button class="tab" data-page="history" title="Accurate full-block scan of the last day: register → ring built → received on AH.">History</button>
       <button class="tab" data-page="setup" title="Verify the initial-setup steps (assets, pools, chunks, collections, invites, games, airdrops) and show the live values used.">Setup</button>
+      <button class="tab hidden" data-page="stats" id="stats-tab" title="Summit usage statistics, accumulated from the start of the summit (2026-06-18 09:00 CET) to the chain tip. Summit network only.">Stats</button>
     </div>
     <div id="status" class="status"></div>
   </header>
@@ -126,6 +151,13 @@ function shell(): string {
         <span id="setup-meta" class="hist-load-label"></span>
       </div>
       <div id="setup"></div>
+    </div>
+    <div id="stats-page" class="page hidden">
+      <div class="hist-toolbar">
+        <button id="refresh-stats" title="Re-scan the summit window from the chain tip back to the start. Already-scanned blocks replay from cache; only new tip blocks are read.">Refresh</button>
+        <span id="stats-progress" class="progress hidden"></span>
+      </div>
+      <div id="stats"></div>
     </div>
   </main>
   <footer>
@@ -165,12 +197,14 @@ function setProgress(p: Progress | null): void {
 /** The active tab, read from the URL hash (so a reload restores it). */
 function pageFromHash(): AppState["page"] {
   const h = location.hash.replace(/^#/, "");
-  return h === "history" || h === "setup" ? h : "live";
+  if (h === "history" || h === "setup") return h;
+  if (h === "stats" && isSummit(state.endpoints)) return "stats";
+  return "live";
 }
 
 function setPage(page: AppState["page"]): void {
   state.page = page;
-  for (const pg of ["live", "history", "setup"] as const)
+  for (const pg of ["live", "history", "setup", "stats"] as const)
     document.querySelector(`#${pg}-page`)!.classList.toggle("hidden", pg !== page);
   for (const t of document.querySelectorAll<HTMLElement>(".tab"))
     t.classList.toggle("active", t.getAttribute("data-page") === page);
@@ -178,6 +212,7 @@ function setPage(page: AppState["page"]): void {
   if (location.hash !== `#${page}`) history.replaceState(null, "", `#${page}`);
   // Chart.js can't measure the canvas while its tab is hidden; fix up on reveal.
   if (page === "history") resizeTimingChart();
+  if (page === "stats") redrawStatsCharts();
 }
 
 /** True if a table-search input inside `containerSel` currently has focus.
@@ -362,6 +397,102 @@ async function doLoadSetup(): Promise<void> {
   }
 }
 
+// ---------- Summit Stats page ----------
+
+function setStatsProgress(p: StatsProgress | null): void {
+  const el = document.querySelector<HTMLDivElement>("#stats-progress")!;
+  if (!p) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+  el.textContent = `${p.phase}… ${p.done}/${p.total} (${pct}%)`;
+}
+
+/** (Re)draw all metric charts from the current result (after innerHTML swaps or tab reveal). */
+function redrawStatsCharts(): void {
+  if (!state.statsResult) return;
+  const el = document.querySelector("#stats")!;
+  for (const m of state.statsResult.metrics) drawMetricChart(el, m, state.statsResult.startMs);
+}
+
+function renderStatsSection(): void {
+  if (searchFocusedIn("#stats-page")) return;
+  const el = document.querySelector("#stats")!;
+  if (!state.statsResult) {
+    el.innerHTML = "";
+    destroyMetricCharts();
+    return;
+  }
+  el.innerHTML = renderStats(state.statsResult);
+  redrawStatsCharts();
+}
+
+/** Show/hide the summit-only Stats tab; bounce off the page if it's no longer summit. */
+function updateStatsTab(): void {
+  const summit = isSummit(state.endpoints);
+  document.querySelector("#stats-tab")!.classList.toggle("hidden", !summit);
+  if (!summit && state.page === "stats") setPage("live");
+}
+
+/** Scan the summit window and render. `full` re-scans from scratch (cache replays the
+ *  unchanged part); otherwise it extends the existing scan to the new tip (live update). */
+async function doLoadStats(full: boolean): Promise<void> {
+  if (!state.conns || !isSummit(state.endpoints)) return;
+  if (state.statsBusy) return;
+  state.statsBusy = true;
+  const conns = state.conns;
+  const abort = new AbortController();
+  state.statsAbort = abort;
+  const btn = document.querySelector<HTMLButtonElement>("#refresh-stats")!;
+  if (full) btn.disabled = true;
+  try {
+    const prev = full ? null : state.stats;
+    if (full) {
+      state.stats = null;
+      state.statsResult = null;
+      renderStatsSection();
+    }
+    // Progressive render only matters for the long first (uncached) scan.
+    const onPartial = full
+      ? (s: StatsState) => {
+          state.stats = s;
+          state.statsResult = deriveStats(s, true);
+          renderStatsSection();
+        }
+      : undefined;
+    const next = await syncStats(
+      conns,
+      prev,
+      full ? setStatsProgress : () => {},
+      abort.signal,
+      Date.now(),
+      onPartial,
+    );
+    state.stats = next;
+    state.statsResult = deriveStats(next, false);
+    renderStatsSection();
+    state.statsLastSync = Date.now();
+  } catch (e) {
+    if ((e as Error).name !== "AbortError")
+      setStatus(`Stats scan failed: ${(e as Error).message}`, "bad");
+  } finally {
+    state.statsBusy = false;
+    state.statsAbort = null;
+    if (full) setStatsProgress(null);
+    btn.disabled = false;
+  }
+}
+
+/** Extend the stats scan to the new tip on a finalized block, throttled. */
+function maybeSyncStatsLive(): void {
+  if (!isSummit(state.endpoints) || !state.stats || state.statsBusy) return;
+  if (Date.now() - state.statsLastSync < 6000) return;
+  void doLoadStats(false);
+}
+
 function teardownSubs(): void {
   for (const s of state.subs) {
     try {
@@ -384,6 +515,7 @@ function startLiveSubscriptions(conns: Connections): void {
           state.people = p;
           renderPeople();
           liveStatus();
+          maybeSyncStatsLive();
         })
         .catch((e) => setStatus(`People read failed: ${(e as Error).message}`, "bad"))
         .finally(() => {
@@ -402,6 +534,7 @@ function startLiveSubscriptions(conns: Connections): void {
           state.assetHub = a;
           renderAh();
           liveStatus();
+          maybeSyncStatsLive();
         })
         .catch((e) => setStatus(`AH read failed: ${(e as Error).message}`, "bad"))
         .finally(() => {
@@ -436,11 +569,19 @@ function doConnect(): void {
   state.historyAcc = null;
   state.historyAutoStarted = false;
   state.setup = null;
+  state.statsAbort?.abort();
+  state.stats = null;
+  state.statsResult = null;
+  state.statsAutoStarted = false;
+  state.statsLastSync = 0;
+  destroyMetricCharts();
   document.querySelector("#people")!.innerHTML = "";
   document.querySelector("#ah")!.innerHTML = "";
   document.querySelector("#intransit")!.innerHTML = "";
   renderHistorySection();
   renderSetupSection();
+  renderStatsSection();
+  updateStatsTab();
 
   setStatus("Connecting…");
   try {
@@ -453,6 +594,11 @@ function doConnect(): void {
     }
     // One setup snapshot per connection; the Setup page has a manual refresh.
     void doLoadSetup();
+    // Summit only: auto-start the usage-stats scan (background, progressive).
+    if (isSummit(state.endpoints) && !state.statsAutoStarted) {
+      state.statsAutoStarted = true;
+      void doLoadStats(true);
+    }
   } catch (e) {
     setStatus(`Connect failed: ${(e as Error).message}`, "bad");
   }
@@ -578,6 +724,7 @@ function wire(): void {
     b.addEventListener("click", () => void doLoadHistory(Number(b.getAttribute("data-window"))));
   document.querySelector("#stop-history")!.addEventListener("click", () => state.historyAbort?.abort());
   document.querySelector("#refresh-setup")!.addEventListener("click", () => void doLoadSetup());
+  document.querySelector("#refresh-stats")!.addEventListener("click", () => void doLoadStats(true));
   document.querySelector("#clear-cache")!.addEventListener("click", () => {
     void (async () => {
       await clearCache();

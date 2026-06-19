@@ -17,16 +17,31 @@ export interface Preset extends Endpoints {
 
 export const PRESETS: Preset[] = [
   {
-    name: "paseo-next",
-    people: "wss://paseo-people-next-system-rpc.polkadot.io",
-    assetHub: "wss://paseo-asset-hub-next-rpc.polkadot.io",
-  },
-  {
     name: "summit",
     people: "wss://summit-people-rpc.polkadot.io",
     assetHub: "wss://summit-asset-hub-rpc.polkadot.io",
   },
+  {
+    name: "paseo-next",
+    people: "wss://paseo-people-next-system-rpc.polkadot.io",
+    assetHub: "wss://paseo-asset-hub-next-rpc.polkadot.io",
+  },
 ];
+
+/** The summit preset — its presence drives the summit-only Stats page. */
+export const SUMMIT_PRESET = PRESETS.find((p) => p.name === "summit")!;
+
+/** True when the connected endpoints are the summit network. Matches either the
+ *  exact preset pair or any endpoint whose host mentions "summit", so a custom
+ *  summit RPC still unlocks the Stats page. */
+export function isSummit(e: Endpoints): boolean {
+  if (e.people === SUMMIT_PRESET.people && e.assetHub === SUMMIT_PRESET.assetHub) return true;
+  return /summit/i.test(e.people) && /summit/i.test(e.assetHub);
+}
+
+/** Start of the summit-stats window: 2026-06-18 09:00 CET (CEST = UTC+2) → 07:00 UTC.
+ *  Stats accumulate from here to the chain tip. */
+export const STATS_START_MS = Date.UTC(2026, 5, 18, 7, 0, 0);
 
 /** Deep link to the PAPI dev console (dev.papi.how) connected to a given endpoint.
  *  Format: https://dev.papi.how/explorer[/<block>]#networkId=custom&endpoint=<url-encoded-wss>

@@ -339,8 +339,41 @@ footer {
 }
 footer code { color: var(--text); }
 
+/* ---- Summit Stats page ---- */
+.stats-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+.stats-meta strong { color: var(--text); }
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+.metric-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: help;
+}
+.metric-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.metric-head .k { font-size: 12px; color: var(--muted); font-weight: 500; }
+.metric-chain { font-size: 9.5px; padding: 0 6px; }
+.metric-card .v { font-size: 28px; font-weight: 600; line-height: 1.1; }
+.metric-source { font-size: 10px; color: var(--muted); opacity: 0.85; word-break: break-word; }
+.metric-chart { position: relative; height: 96px; margin-top: 4px; }
+
 /* Discoverability for tooltips (standard HTML title attributes). */
-th[title], .card[title], h2[title], h3[title], .controls label[title] { cursor: help; }
+th[title], .card[title], .metric-card[title], h2[title], h3[title], .controls label[title] { cursor: help; }
 thead th[title] {
   text-decoration: underline dotted rgba(154, 163, 178, 0.5);
   text-underline-offset: 3px;
