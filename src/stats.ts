@@ -239,7 +239,8 @@ export interface AirdropEventRow {
 }
 
 /** Read the active airdrop events (one per game) with their registered prizes. Live
- *  snapshot from `Airdrop.Events` storage — completed events are removed by the chain. */
+ *  snapshot from `Airdrop.Events` storage — completed events are removed by the chain.
+ *  Only events whose registration starts at/after the summit start are kept. */
 async function fetchAirdropEvents(people: ChainConn<PeopleApi>): Promise<AirdropEventRow[]> {
   const cash = await findCash(people, "finalized");
   const dec = cash ? cash.value.decimals : 6;

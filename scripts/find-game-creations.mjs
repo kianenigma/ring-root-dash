@@ -35,6 +35,7 @@ const getArg = (name, def) => { const i = argv.indexOf(`--${name}`); return i >=
 const WS = getArg("ws", "wss://summit-people-rpc.polkadot.io");
 const WANT = Number(getArg("n", "3"));
 const MAX_BLOCKS = Number(getArg("max", "80000"));
+const FROM = getArg("from", null); // optional: start scanning downward from this block
 const BATCH = 80;
 
 const u8a = (hex) => { const h = hex.startsWith("0x") ? hex.slice(2) : hex; const o = new Uint8Array(h.length / 2); for (let i = 0; i < o.length; i++) o[i] = parseInt(h.substr(i * 2, 2), 16); return o; };
@@ -125,11 +126,14 @@ try {
   console.log(`Finalized head: #${head.number}`);
   const { decodeExtrinsic } = buildDecoder(await fetchMetadata(req, head.hash));
 
-  // 1) Find candidate blocks (most-recent first) via the Game.GamesScheduled event.
+  // 1) Find candidate blocks (most-recent first) via the Game.GamesScheduled event,
+  //    decoding + printing each as it's found.
   const candidates = [];
-  const stopAt = Math.max(1, head.number - MAX_BLOCKS);
-  console.log(`Scanning #${head.number} → #${stopAt} for Game.GamesScheduled events…`);
-  for (let hi = head.number; hi > stopAt && candidates.length < WANT; hi -= BATCH) {
+  let txCount = 0;
+  const top = FROM ? Number(FROM) : head.number;
+  const stopAt = Math.max(1, top - MAX_BLOCKS);
+  console.log(`Scanning #${top} → #${stopAt} for Game.GamesScheduled events…`);
+  for (let hi = top; hi > stopAt && txCount < WANT; hi -= BATCH) {
     const lo = Math.max(stopAt + 1, hi - BATCH + 1);
     const nums = []; for (let n = hi; n >= lo; n--) nums.push(n);
     const results = await Promise.all(nums.map(async (n) => {
