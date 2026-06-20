@@ -6,6 +6,14 @@ import { escapeHtml, fmtDuration, fmtTime } from "./format";
 
 const fmtCash = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 6 });
 
+/** Full-screen + reset-zoom controls for a chart, keyed so main.ts can target it. */
+function chartTools(key: string): string {
+  return `<div class="chart-tools">
+    <button class="chart-zoom-reset" data-chart="${key}" title="Reset pan/zoom (drag to pan, Ctrl/⌘+wheel to zoom)">⟲</button>
+    <button class="chart-fs" data-chart="${key}" title="Open full screen (bare wheel to zoom)">⤢</button>
+  </div>`;
+}
+
 function chainChip(chain: MetricResult["chain"]): string {
   const label = chain === "people" ? "People" : "Asset Hub";
   return `<span class="chip na metric-chain">${label}</span>`;
@@ -19,7 +27,7 @@ function metricCard(m: MetricResult): string {
     </div>
     <div class="v">${m.pending ? "…" : m.value.toLocaleString()}</div>
     <div class="metric-source mono" title="The exact on-chain ${m.kind === "event" ? "event" : "storage item"} scraped for this metric.">${escapeHtml(m.source)}</div>
-    <div class="metric-chart"><canvas data-metric="${m.key}"></canvas></div>
+    <div class="metric-chart">${chartTools(`metric:${m.key}`)}<canvas data-metric="${m.key}"></canvas></div>
   </div>`;
 }
 
@@ -50,7 +58,31 @@ export function renderStats(r: StatsResult): string {
     <div class="stats-grid">${cards}</div>
     ${notes}
   </div>
+  ${recyclerFlowPanel(r)}
   ${airdropEventsPanel(r)}`;
+}
+
+function recyclerFlowPanel(r: StatsResult): string {
+  const f = r.recyclerFlow;
+  const heldN = Math.max(0, f.count.inflowTotal - f.count.outflowTotal);
+  const heldCash = Math.max(0, f.value.inflowTotal - f.value.outflowTotal);
+  return `<div class="panel full">
+    <h2 title="Flow of coins into and out of the coinage recyclers since the summit start. The gap between cumulative inflow and outflow is how much is currently held (locked) in recyclers.">Coinage recycler flow <small>cumulative inflow (loaded) vs outflow (unloaded)</small></h2>
+    <div class="stats-meta">
+      <span title="Coins loaded into / unloaded from recyclers (count).">count: <strong>${f.count.inflowTotal.toLocaleString()}</strong> in · <strong>${f.count.outflowTotal.toLocaleString()}</strong> out · <strong>${heldN.toLocaleString()}</strong> held</span>
+      <span title="CASH value (each coin = 2^value × 0.01 CASH) loaded / unloaded.">value: <strong>${fmtCash(f.value.inflowTotal)}</strong> in · <strong>${fmtCash(f.value.outflowTotal)}</strong> out · <strong>${fmtCash(heldCash)} CASH</strong> held</span>
+    </div>
+    <div class="flow-charts">
+      <div class="flow-chart">
+        <div class="flow-head">Event count <small>loads vs unloaded coins</small></div>
+        <div class="flow-canvas-wrap">${chartTools("flow:count")}<canvas data-flow="count"></canvas></div>
+      </div>
+      <div class="flow-chart">
+        <div class="flow-head">Value <small>CASH (2^value weighted)</small></div>
+        <div class="flow-canvas-wrap">${chartTools("flow:value")}<canvas data-flow="value"></canvas></div>
+      </div>
+    </div>
+  </div>`;
 }
 
 function airdropRow(e: AirdropEventRow): string {

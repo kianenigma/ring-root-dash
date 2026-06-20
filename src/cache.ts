@@ -23,8 +23,9 @@
 import type { Chain } from "./domain";
 
 /** Bump this whenever the stored shape (PeopleExtract/AhExtract) or what we extract
- *  changes. The old cache is dropped automatically on the next open. */
-export const SCHEMA_VERSION = 1;
+ *  changes. The old cache is dropped automatically on the next open.
+ *  v2: added coinage recycler facts (recLoads/recUnloads/recBuilt) to PeopleExtract. */
+export const SCHEMA_VERSION = 2;
 
 const DB_NAME = "ring-root-cache";
 const BLOCKS = "blocks";
@@ -41,6 +42,13 @@ export interface PeopleExtract {
   built: Array<{ id: string; ri: number; rev: number }>;
   /** MembersOnboarded collection ids. */
   onboard: string[];
+  /** Coinage recycler loads: coin values loaded into a recycler this block (each
+   *  entry = one coin removed from its owner → balance temporarily unavailable). */
+  recLoads?: number[];
+  /** Coinage recycler unloads: { v: coin value, c: aliases unloaded (coins freed) }. */
+  recUnloads?: Array<{ v: number; c: number }>;
+  /** RingBuilt for recycler collections: { v: coin value, ri: ring index, rev }. */
+  recBuilt?: Array<{ v: number; ri: number; rev: number }>;
 }
 
 /** Parsed Asset-Hub-block facts. */

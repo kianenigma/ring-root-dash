@@ -271,8 +271,10 @@ async function fetchAirdropEvents(people: ChainConn<PeopleApi>): Promise<Airdrop
       endTime: Number(info.end_time),
     };
   });
-  rows.sort((a, b) => (b.gameIndex ?? -1) - (a.gameIndex ?? -1));
-  return rows;
+  const startSecs = STATS_START_MS / 1000;
+  return rows
+    .filter((r) => r.regStarts >= startSecs)
+    .sort((a, b) => (b.gameIndex ?? -1) - (a.gameIndex ?? -1));
 }
 
 // ---------------- scan state ----------------
@@ -366,7 +368,18 @@ function rangesExcluding(from: number, to: number, failed: Set<number>): Range[]
   return runs;
 }
 
-type RawEvent = { event: { type: string; value: { type: string } } };
+type RawEvent = { event: { type: string; value: { type: string; value?: unknown } } };
+
+// Coinage recycler inflow/outflow aggregates stored per block in the counts record
+// (alongside metric counts). A coin of exponent `value` is worth 2^value × the
+// UnderlyingAssetUnit (10^4 = 0.01 CASH), so value flow weights each event by 2^value.
+const REC_LOAD_N = "__recLoadN"; // load events (coins locked into recyclers)
+const REC_UNLOAD_N = "__recUnloadN"; // coins unloaded (sum of input_count)
+const REC_LOAD_CASH = "__recLoadCash"; // CASH loaded in
+const REC_UNLOAD_CASH = "__recUnloadCash"; // CASH unloaded out
+const UNDERLYING_UNIT_CASH = 0.01; // UnderlyingAssetUnit 10^4 / CASH decimals 10^6
+const CASH_UNIT = 1e6; // CASH has 6 decimals → planck → CASH
+const coinCash = (value: number) => Math.pow(2, value) * UNDERLYING_UNIT_CASH;
 
 const hashCaches = new WeakMap<object, HashCache>();
 function hashCacheFor(client: object): HashCache {
@@ -464,6 +477,37 @@ async function scanChainEvents(
           const id = `${r.event.type}.${r.event.value.type}`;
           const key = matchers.get(id);
           if (key) counts[key] = (counts[key] ?? 0) + 1;
+          // Recycler inflow/outflow (People only): count + CASH value, weighted by 2^value.
+          if (chain === "people" && r.event.type === "Coinage") {
+            const vt = r.event.value.type;
+            const p = (r.event.value.value ?? {}) as Record<string, number>;
+            const add = (k: string, n: number) => (counts[k] = (counts[k] ?? 0) + n);
+            if (vt === "RecyclerLoadedWithCoin" || vt === "RecyclerLoadedWithExternalAsset") {
+              add(REC_LOAD_N, 1);
+              add(REC_LOAD_CASH, coinCash(p.value));
+            } else if (vt === "RecyclerUnloadedIntoCoin") {
+              add(REC_UNLOAD_N, p.input_count);
+              add(REC_UNLOAD_CASH, p.input_count * coinCash(p.input_value));
+            } else if (
+              vt === "RecyclerUnloadedIntoExternalAsset" ||
+              vt === "RecyclerUnloadedIntoExternalAssetAndVouchers"
+            ) {
+              add(REC_UNLOAD_N, p.input_count);
+              add(REC_UNLOAD_CASH, p.input_count * coinCash(p.value));
+            } else if (vt === "RecyclersUnloadedIntoCoin") {
+              // Multi-recycler consolidation into one coin: output_value carries the
+              // full consolidated value (= total unloaded), so don't multiply by count.
+              add(REC_UNLOAD_N, p.input_count);
+              add(REC_UNLOAD_CASH, coinCash(p.output_value));
+            } else if (
+              vt === "RecyclersUnloadedIntoExternalAsset" ||
+              vt === "RecyclersUnloadedIntoExternalAssetNonAnonymous"
+            ) {
+              // Multi-recycler withdrawal: `amount` is the real external CASH withdrawn.
+              add(REC_UNLOAD_N, p.input_count);
+              add(REC_UNLOAD_CASH, Number(p.amount) / CASH_UNIT);
+            }
+          }
         }
         const hasAny = Object.keys(counts).length > 0;
         // Timestamp is best-effort: it positions the block on the chart, but its
@@ -752,6 +796,20 @@ export interface MetricResult {
   pending?: boolean;
 }
 
+/** Cumulative inflow vs outflow over time (the gap = currently held in recyclers). */
+export interface FlowSeries {
+  inflow: Array<{ x: number; y: number }>;
+  outflow: Array<{ x: number; y: number }>;
+  inflowTotal: number;
+  outflowTotal: number;
+}
+
+/** Recycler flow: one series pair by event count, one by CASH value (2^value weighted). */
+export interface RecyclerFlow {
+  count: FlowSeries;
+  value: FlowSeries;
+}
+
 export interface StatsResult {
   startMs: number;
   peopleTip: number;
@@ -762,6 +820,7 @@ export interface StatsResult {
   scannedAh: number;
   metrics: MetricResult[];
   airdropEvents: AirdropEventRow[];
+  recyclerFlow: RecyclerFlow;
   notes: string[];
   inProgress: boolean;
 }
@@ -833,6 +892,15 @@ export function deriveStats(state: StatsState, inProgress: boolean): StatsResult
     const { value, points, pending } = storageSeries(state.samples.get(sm.key), tip);
     metrics.push({ ...metricMeta(sm), kind: "storage", value, points, pending });
   }
+
+  // Recycler inflow/outflow (People): cumulative loads vs unloads, by count and CASH value.
+  const fl = (k: string) => eventSeries(state.pBlocks, k, state.startMs, state.people.tipTimeMs);
+  const [loadN, unloadN, loadCash, unloadCash] = [REC_LOAD_N, REC_UNLOAD_N, REC_LOAD_CASH, REC_UNLOAD_CASH].map(fl);
+  const recyclerFlow: RecyclerFlow = {
+    count: { inflow: loadN.points, outflow: unloadN.points, inflowTotal: loadN.value, outflowTotal: unloadN.value },
+    value: { inflow: loadCash.points, outflow: unloadCash.points, inflowTotal: loadCash.value, outflowTotal: unloadCash.value },
+  };
+
   return {
     startMs: state.startMs,
     peopleTip: state.people.tip,
@@ -843,6 +911,7 @@ export function deriveStats(state: StatsState, inProgress: boolean): StatsResult
     scannedAh: state.aCovered.reduce((s, [f, t]) => s + (t - f + 1), 0),
     metrics,
     airdropEvents: state.airdropEvents,
+    recyclerFlow,
     notes: state.notes,
     inProgress,
   };

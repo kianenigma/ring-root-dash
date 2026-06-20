@@ -192,12 +192,72 @@ export interface ScanWindow {
   headTimeMs: number | null;
 }
 
+// ---------------- Coinage recycler lifecycle ----------------
+// Coins at MaximumAge must be loaded into a per-value recycler ring (a Members
+// collection), which is (re)built before the owner can unload a fresh coin. While
+// loaded, the coin is removed from its owner — the "balance unavailable" window.
+
+/** A single recycler ring (re)build, by coin value + ring index. */
+export interface RecyclerRingBuild {
+  /** Coin denomination (signed exponent) the recycler is for. */
+  value: number;
+  ringIndex: number;
+  revision: number;
+  builtBlock: number;
+  builtTimeMs: number | null;
+}
+
+/** One load paired to the recycler ring build that next made it unloadable. */
+export interface RecyclerLockSample {
+  value: number;
+  loadBlock: number;
+  loadTimeMs: number | null;
+  builtBlock: number | null;
+  builtTimeMs: number | null;
+  /** builtTime − loadTime: how long the coin was locked before becoming unloadable. */
+  lockMs: number | null;
+  /** No recycler ring build seen after this load yet (still locked). */
+  pending: boolean;
+}
+
+/** Per-coin-value recycler activity over the scanned window. */
+export interface RecyclerValueSummary {
+  value: number;
+  /** Coins loaded (each = one balance made temporarily unavailable). */
+  loads: number;
+  /** Coins freed by unloads (sum of unloaded alias counts). */
+  unloadedCoins: number;
+  /** Recycler ring (re)builds. */
+  builds: number;
+  /** loads − unloadedCoins within the window (≥0): coins still locked. */
+  outstanding: number;
+  firstLoadTimeMs: number | null;
+  lastLoadTimeMs: number | null;
+  lastBuiltTimeMs: number | null;
+  /** Max / avg lock window (load → next ring build) observed. */
+  maxLockMs: number | null;
+  avgLockMs: number | null;
+  /** Loads with no subsequent recycler ring build yet (stuck/locked). */
+  pendingLoads: number;
+}
+
+export interface RecyclingResult {
+  byValue: RecyclerValueSummary[];
+  builds: RecyclerRingBuild[];
+  lockSamples: RecyclerLockSample[];
+  totalLoads: number;
+  totalUnloadedCoins: number;
+  totalOutstanding: number;
+}
+
 export interface HistoryResult {
   people: ScanWindow;
   assetHub: ScanWindow;
   events: TimedEvent[];
   rings: RingLifecycle[];
   registrations: RegistrationDelay[];
+  /** Coinage recycler lifecycle (load → ring built → unload). */
+  recycling: RecyclingResult;
   /** Blocks actually scanned (coverage), reported rather than silently truncated. */
   scannedPeople: number;
   scannedAh: number;

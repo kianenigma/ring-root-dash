@@ -13,6 +13,7 @@ import {
   type InTransitRow,
   type PeopleCollection,
   type PeopleLive,
+  type RecyclingResult,
   type RegistrationDelay,
   type RingLifecycle,
   type TimedEvent,
@@ -324,6 +325,107 @@ export function renderHistory(h: HistoryResult, ep: Endpoints): string {
     ${renderRegistrationDelays(h.registrations, ep)}
     ${renderRingLifecycles(h.rings, ep)}
     ${renderTimeline(h.events, ep)}
+  </section>
+  ${renderRecycling(h.recycling)}`;
+}
+
+const fmtMs = (ms: number | null) => (ms == null ? "—" : fmtTime(ms, "ms"));
+const fmtDur = (ms: number | null) => (ms == null ? "—" : fmtDuration(ms));
+
+/** Coinage recycler lifecycle: coins loaded at max age → recycler ring (re)built →
+ *  unloaded. The load→built gap is how long the owner's balance stays unavailable. */
+export function renderRecycling(r: RecyclingResult): string {
+  const stuck = r.byValue.reduce((s, v) => s + v.pendingLoads, 0);
+  const banner =
+    stuck > 0
+      ? `<div class="banner bad" title="A coin is removed from its owner when loaded into a recycler and only restored on unload (after the recycler ring is (re)built). These loads have no recycler ring build yet in the scanned window — balances still locked.">⚠ ${stuck} coin load(s) with no recycler ring build yet — balances still locked. Load more history if these loaded before the window.</div>`
+      : "";
+
+  const byValueRows = r.byValue
+    .map((v) => {
+      const lockCls = v.maxLockMs != null && v.maxLockMs >= 2 * 60 * 1000 ? "bad" : "";
+      return `<tr data-ident="value ${v.value}">
+        <td>${v.value}</td>
+        <td>${v.loads}</td>
+        <td>${v.builds}</td>
+        <td>${v.unloadedCoins}</td>
+        <td>${v.outstanding > 0 ? `<span class="warn">${v.outstanding}</span>` : "0"}</td>
+        <td>${v.pendingLoads > 0 ? `<span class="bad">${v.pendingLoads}</span>` : "0"}</td>
+        <td class="${lockCls}">${fmtDur(v.maxLockMs)}</td>
+        <td>${fmtDur(v.avgLockMs)}</td>
+        <td>${fmtMs(v.lastLoadTimeMs)}</td>
+        <td>${fmtMs(v.lastBuiltTimeMs)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const lockRows = r.lockSamples
+    .slice(0, 400)
+    .map((s) => {
+      const status = s.pending
+        ? `<span class="bad">locked (no build yet)</span>`
+        : `<span class="ok">unlockable</span>`;
+      const lockCls = s.lockMs != null && s.lockMs >= 2 * 60 * 1000 ? "bad" : "";
+      return `<tr data-ident="value ${s.value}">
+        <td>${s.value}</td>
+        <td>#${s.loadBlock}</td>
+        <td>${fmtMs(s.loadTimeMs)}</td>
+        <td>${s.builtBlock != null ? `#${s.builtBlock}` : "—"}</td>
+        <td class="${lockCls}">${fmtDur(s.lockMs)}</td>
+        <td>${status}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const buildRows = r.builds
+    .map(
+      (b) => `<tr data-ident="value ${b.value} ring ${b.ringIndex}">
+        <td>${b.value}</td>
+        <td>${b.ringIndex}</td>
+        <td>${b.revision}</td>
+        <td>#${b.builtBlock}</td>
+        <td>${fmtMs(b.builtTimeMs)}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const summary = `<div class="hist-summary" title="Coins reaching MaximumAge (16) are loaded into a per-value recycler ring (a Members collection). The coin is removed from its owner — balance unavailable — until the recycler ring is (re)built and the owner unloads a fresh coin.">
+    <div><b>${r.totalLoads}</b> coin load(s) · <b>${r.builds.length}</b> recycler ring build(s) · <b>${r.totalUnloadedCoins}</b> unloaded · <b>${r.totalOutstanding}</b> still locked (in window)</div>
+  </div>`;
+
+  return `
+  <section class="panel full">
+    <h2 title="Why a balance can go unavailable: a max-age coin must be recycled (loaded → recycler ring rebuilt → unloaded). The load→built gap is the lock window.">Coinage recycling <small>coin loaded (locked) → recycler ring built → unloaded</small></h2>
+    ${banner}
+    ${summary}
+    ${table({
+      id: "rec-by-value",
+      title: "Recycler activity by coin value",
+      tip: "Per coin denomination: loads (coins locked), recycler ring builds, unloaded coins, still-locked count, and the lock window (load → next ring build).",
+      head: `${th("value", "Coin denomination (signed exponent)")}${th("loads", "Coins loaded into the recycler (each = one locked balance)")}${th("ring builds", "Recycler ring (re)builds")}${th("unloaded", "Coins freed by unloads")}${th("locked", "loads − unloaded in window")}${th("stuck", "Loads with no ring build yet")}${th("max lock", "Longest load→build gap")}${th("avg lock", "Average load→build gap")}${th("last load", "")}${th("last built", "")}`,
+      rows: byValueRows,
+      cols: 10,
+      searchable: true,
+    })}
+    ${table({
+      id: "rec-locks",
+      title: "Lock windows (recent coin loads)",
+      tip: "Each load paired to the recycler ring build that next made it unloadable. 'locked (no build yet)' means the balance is still unavailable in the scanned window.",
+      head: `${th("value", "")}${th("loaded at", "Block the coin was loaded")}${th("load time", "")}${th("built at", "Block the recycler ring was (re)built")}${th("lock window", "built time − load time")}${th("status", "")}`,
+      rows: lockRows,
+      cols: 6,
+      searchable: true,
+      scroll: true,
+    })}
+    ${table({
+      id: "rec-builds",
+      title: "Recycler ring builds",
+      tip: "Each recycler ring (re)build, by coin value and ring index. A build is when loaded coins for that value become unloadable.",
+      head: `${th("value", "")}${th("ring", "Ring index")}${th("revision", "")}${th("built at", "Block")}${th("built time", "")}`,
+      rows: buildRows,
+      cols: 5,
+      scroll: true,
+    })}
   </section>`;
 }
 

@@ -371,6 +371,19 @@ footer code { color: var(--text); }
 .metric-card .v { font-size: 28px; font-weight: 600; line-height: 1.1; }
 .metric-source { font-size: 10px; color: var(--muted); opacity: 0.85; word-break: break-word; }
 .metric-chart { position: relative; height: 96px; margin-top: 4px; }
+
+/* Chart full-screen + reset-zoom controls (overlaid top-right of any chart). */
+.chart-tools { position: absolute; top: 2px; right: 2px; z-index: 2; display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s; }
+.metric-chart:hover .chart-tools, .flow-canvas-wrap:hover .chart-tools { opacity: 1; }
+.chart-tools button { padding: 0 5px; font-size: 12px; line-height: 1.5; background: var(--panel); border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; }
+.chart-tools button:hover { color: var(--text); }
+
+/* Recycler flow charts: two side-by-side multi-series charts. */
+.flow-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .flow-charts { grid-template-columns: 1fr; } }
+.flow-head { font-size: 12px; color: var(--text); margin-bottom: 4px; }
+.flow-head small { color: var(--muted); margin-left: 6px; }
+.flow-canvas-wrap { position: relative; height: 240px; }
 .stats-table-wrap { overflow-x: auto; }
 table.stats-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.stats-table th, table.stats-table td { padding: 5px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }

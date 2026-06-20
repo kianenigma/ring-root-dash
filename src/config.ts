@@ -78,8 +78,9 @@ export function saveEndpoints(e: Endpoints): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(e));
 }
 
-/** Window of history to scan when the user clicks "Load 1 day", in milliseconds. */
-export const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Default history window to scan, in milliseconds (1 hour — kept short so the
+ *  initial scan is fast; use the "Load older" buttons to extend further back). */
+export const HISTORY_WINDOW_MS = 60 * 60 * 1000;
 
 /** Propagation lag (People build -> AH applied) above which a row is flagged slow. */
 export const SLOW_LAG_MS = 2 * 60 * 1000;

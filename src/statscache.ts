@@ -17,8 +17,12 @@
 import type { Chain } from "./domain";
 import { addRange, type Range } from "./cache";
 
-/** Bump when the stored shape changes; the old stats cache is dropped on next open. */
-export const STATS_SCHEMA_VERSION = 1;
+/** Bump when the stored per-block shape OR what we extract into it changes — the old
+ *  cache is dropped on next open so stale blocks (missing newly-added keys) can't be
+ *  replayed out of sync with freshly-scanned ones.
+ *  v2: added recycler inflow/outflow aggregates (load/unload count + CASH) to the
+ *      per-block counts, incl. the plural multi-recycler unload variants. */
+export const STATS_SCHEMA_VERSION = 2;
 
 const DB_NAME = "summit-stats-cache";
 const BLOCKS = "blocks";

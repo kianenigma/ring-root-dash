@@ -27,6 +27,10 @@ import { HISTORY_WINDOW_MS } from "./config";
 import { firstBlockAtLeast, HashCache } from "./chainio";
 import type {
   HistoryResult,
+  RecyclerLockSample,
+  RecyclerRingBuild,
+  RecyclerValueSummary,
+  RecyclingResult,
   RegistrationDelay,
   RingLifecycle,
   ScanWindow,
@@ -66,6 +70,10 @@ export interface HistoryAcc {
   registrations: Array<{ key: string; block: number; timeMs: number | null }>;
   /** Rings present on AH just before the earliest scanned block. */
   receivedBeforeWindow: Set<string>;
+  // ---- Coinage recycler lifecycle (People only) ----
+  recLoads: Array<{ value: number; block: number; timeMs: number | null }>;
+  recUnloads: Array<{ value: number; count: number; block: number; timeMs: number | null }>;
+  recBuilds: Array<{ value: number; ringIndex: number; revision: number; block: number; timeMs: number | null }>;
   notes: string[];
   pHead: number;
   aHead: number;
@@ -134,6 +142,30 @@ async function tsAt(
 
 // A raw decoded event row from System.Events: { phase, event, topics }.
 type RawEvent = { event: { type: string; value: { type: string; value: unknown } } };
+
+// ---- Coinage recycler recognition ----
+// Coins that hit MaximumAge are loaded into a per-coin-value recycler ring (a Members
+// collection, id = b"coinage/recycler" ++ value byte), which must be (re)built before
+// the owner can unload a fresh coin. While loaded, the coin is removed from its owner
+// (balance unavailable). We track load → recycler-ring-built → unload to measure that.
+const RECYCLER_EVENTS = new Set([
+  "RecyclerLoadedWithCoin",
+  "RecyclerLoadedWithExternalAsset",
+  "RecyclerUnloadedIntoCoin",
+  "RecyclerUnloadedIntoExternalAsset",
+  "RecyclerUnloadedIntoExternalAssetAndVouchers",
+]);
+const RECYCLER_PREFIX_HEX = [..."coinage/recycler"]
+  .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+  .join("");
+function isRecyclerId(idHex: string): boolean {
+  return idHex.startsWith("0x") && idHex.slice(2).startsWith(RECYCLER_PREFIX_HEX);
+}
+/** The coin value (signed i8) encoded at byte 16 of a recycler collection identifier. */
+function recyclerValue(idHex: string): number {
+  const byte = parseInt(idHex.slice(34, 36), 16); // "0x" + 16 bytes → hex offset 34
+  return Number.isNaN(byte) ? 0 : byte > 127 ? byte - 256 : byte;
+}
 
 // Hash caches are kept per chain across loads (module-level cache would also work,
 // but tying them to the connection keeps things simple). They are recreated when a
@@ -236,6 +268,9 @@ export async function scanHistory(
       ahUpdates: new Map(),
       registrations: [],
       receivedBeforeWindow: new Set(),
+      recLoads: [],
+      recUnloads: [],
+      recBuilds: [],
       notes,
       pHead: pHead.number,
       aHead: aHead.number,
@@ -330,6 +365,9 @@ export async function scanHistory(
   const stageRegs: HistoryAcc["registrations"] = [];
   const stageBuilds = new Map<string, BuildRec[]>();
   const stageUpdates = new Map<string, BuildRec[]>();
+  const stageRecLoads: HistoryAcc["recLoads"] = [];
+  const stageRecUnloads: HistoryAcc["recUnloads"] = [];
+  const stageRecBuilds: HistoryAcc["recBuilds"] = [];
   const pushTo = (m: Map<string, BuildRec[]>, k: string, rec: BuildRec) => {
     const arr = m.get(k);
     if (arr) arr.push(rec);
@@ -369,6 +407,11 @@ export async function scanHistory(
       if (!a.subscribed.has(id)) continue;
       stageEvents.push({ chain: "people", block: n, timeMs: e.t, kind: "Onboarded", identifier: id });
     }
+    // Coinage recycler facts (not subscription-filtered — these are People-internal).
+    for (const value of e.recLoads ?? []) stageRecLoads.push({ value, block: n, timeMs: e.t });
+    for (const u of e.recUnloads ?? []) stageRecUnloads.push({ value: u.v, count: u.c, block: n, timeMs: e.t });
+    for (const b of e.recBuilt ?? [])
+      stageRecBuilds.push({ value: b.v, ringIndex: b.ri, revision: b.rev, block: n, timeMs: e.t });
   };
   const mergeAh = (n: number, e: AhExtract) => {
     for (const ev of e.events)
@@ -389,16 +432,29 @@ export async function scanHistory(
     }
     const relevant = recs.filter(
       (r) =>
-        r.event.type === "Members" &&
-        ["MemberAdded", "RingBuilt", "MembersOnboarded"].includes(r.event.value.type),
+        (r.event.type === "Members" &&
+          ["MemberAdded", "RingBuilt", "MembersOnboarded"].includes(r.event.value.type)) ||
+        (r.event.type === "Coinage" && RECYCLER_EVENTS.has(r.event.value.type)),
     );
     if (relevant.length === 0) return EMPTY_PEOPLE;
     const timeMs = await tsAt(pTs, pHashes, n);
     const added: string[] = [];
     const built: Array<{ id: string; ri: number; rev: number }> = [];
     const onboard: string[] = [];
+    const recLoads: number[] = [];
+    const recUnloads: Array<{ v: number; c: number }> = [];
+    const recBuilt: Array<{ v: number; ri: number; rev: number }> = [];
     for (const r of relevant) {
       const v = r.event.value;
+      if (r.event.type === "Coinage") {
+        const p = v.value as Record<string, number>;
+        if (v.type === "RecyclerLoadedWithCoin" || v.type === "RecyclerLoadedWithExternalAsset")
+          recLoads.push(p.value);
+        else if (v.type === "RecyclerUnloadedIntoCoin")
+          recUnloads.push({ v: p.input_value, c: p.input_count });
+        else recUnloads.push({ v: p.value, c: p.input_count }); // external-asset unloads
+        continue;
+      }
       if (v.type === "MemberAdded") {
         added.push(asHex((v.value as { key: unknown }).key));
       } else if (v.type === "RingBuilt") {
@@ -410,12 +466,14 @@ export async function scanHistory(
         } catch {
           /* leave 0 */
         }
-        built.push({ id: asHex(o.identifier), ri: o.ring_index, rev: revision });
+        const idHex = asHex(o.identifier);
+        if (isRecyclerId(idHex)) recBuilt.push({ v: recyclerValue(idHex), ri: o.ring_index, rev: revision });
+        else built.push({ id: idHex, ri: o.ring_index, rev: revision });
       } else if (v.type === "MembersOnboarded") {
         onboard.push(asHex((v.value as { identifier: unknown }).identifier));
       }
     }
-    return { t: timeMs, added, built, onboard };
+    return { t: timeMs, added, built, onboard, recLoads, recUnloads, recBuilt };
   };
   const fetchAh = async (n: number): Promise<AhExtract | null> => {
     const h = (await aHashes.hashAt(n)) as Hex | null;
@@ -452,7 +510,10 @@ export async function scanHistory(
     return { t: timeMs, events, updates };
   };
 
-  const hasPeople = (e: PeopleExtract) => e.added.length + e.built.length + e.onboard.length > 0;
+  const hasPeople = (e: PeopleExtract) =>
+    e.added.length + e.built.length + e.onboard.length +
+      (e.recLoads?.length ?? 0) + (e.recUnloads?.length ?? 0) + (e.recBuilt?.length ?? 0) >
+    0;
   const hasAh = (e: AhExtract) => e.events.length > 0;
 
   // ---- Preload the cache for the ranges about to be scanned (one read per chain). ----
@@ -521,6 +582,9 @@ export async function scanHistory(
     if (arr) arr.push(...recs);
     else a.ahUpdates.set(k, recs);
   }
+  a.recLoads.push(...stageRecLoads);
+  a.recUnloads.push(...stageRecUnloads);
+  a.recBuilds.push(...stageRecBuilds);
 
   // ---- Persist freshly-scanned blocks + extend coverage to the iterated ranges.
   // (Skipped on abort: the throw above bypasses this, so a partial range is never
@@ -649,10 +713,96 @@ export function deriveHistory(acc: HistoryAcc): HistoryResult {
     events,
     rings,
     registrations,
+    recycling: deriveRecycling(acc),
     scannedPeople: acc.scannedPeople,
     scannedAh: acc.scannedAh,
     notes: acc.notes,
     inProgress: false,
+  };
+}
+
+/** Build the coinage recycler lifecycle view: pair each coin load to the recycler
+ *  ring build that next made it unloadable (the lock window), and summarise per value. */
+function deriveRecycling(acc: HistoryAcc): RecyclingResult {
+  // Recycler ring builds grouped by coin value, ascending by time.
+  const buildsByValue = new Map<number, Array<{ block: number; timeMs: number | null }>>();
+  for (const b of acc.recBuilds) {
+    const arr = buildsByValue.get(b.value) ?? [];
+    arr.push({ block: b.block, timeMs: b.timeMs });
+    buildsByValue.set(b.value, arr);
+  }
+  for (const arr of buildsByValue.values())
+    arr.sort((x, y) => (x.timeMs ?? 0) - (y.timeMs ?? 0) || x.block - y.block);
+
+  // Pair each load to the first build of the same value at/after the load time.
+  const lockSamples: RecyclerLockSample[] = acc.recLoads.map((l) => {
+    const arr = buildsByValue.get(l.value) ?? [];
+    const match =
+      l.timeMs != null ? arr.find((b) => b.timeMs != null && b.timeMs >= l.timeMs!) ?? null : null;
+    return {
+      value: l.value,
+      loadBlock: l.block,
+      loadTimeMs: l.timeMs,
+      builtBlock: match?.block ?? null,
+      builtTimeMs: match?.timeMs ?? null,
+      lockMs: match && match.timeMs != null && l.timeMs != null ? match.timeMs - l.timeMs : null,
+      pending: !match,
+    };
+  });
+  lockSamples.sort((x, y) => (y.loadTimeMs ?? 0) - (x.loadTimeMs ?? 0) || y.loadBlock - x.loadBlock);
+
+  // Distinct ring builds (value:ring:revision), most recent first.
+  const seen = new Set<string>();
+  const builds: RecyclerRingBuild[] = [];
+  for (const b of [...acc.recBuilds].sort((x, y) => x.block - y.block)) {
+    const k = `${b.value}:${b.ringIndex}:${b.revision}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    builds.push({ value: b.value, ringIndex: b.ringIndex, revision: b.revision, builtBlock: b.block, builtTimeMs: b.timeMs });
+  }
+  builds.sort((x, y) => (y.builtTimeMs ?? 0) - (x.builtTimeMs ?? 0) || y.builtBlock - x.builtBlock);
+
+  const values = new Set<number>([
+    ...acc.recLoads.map((l) => l.value),
+    ...acc.recUnloads.map((u) => u.value),
+    ...acc.recBuilds.map((b) => b.value),
+  ]);
+  let totalLoads = 0;
+  let totalUnloadedCoins = 0;
+  const byValue: RecyclerValueSummary[] = [];
+  for (const value of values) {
+    const loads = acc.recLoads.filter((l) => l.value === value);
+    const unloadedCoins = acc.recUnloads.filter((u) => u.value === value).reduce((s, u) => s + u.count, 0);
+    const buildsV = acc.recBuilds.filter((b) => b.value === value);
+    const samples = lockSamples.filter((s) => s.value === value);
+    const completed = samples.map((s) => s.lockMs).filter((m): m is number => m != null);
+    const loadTimes = loads.map((l) => l.timeMs).filter((t): t is number => t != null);
+    const buildTimes = buildsV.map((b) => b.timeMs).filter((t): t is number => t != null);
+    totalLoads += loads.length;
+    totalUnloadedCoins += unloadedCoins;
+    byValue.push({
+      value,
+      loads: loads.length,
+      unloadedCoins,
+      builds: buildsV.length,
+      outstanding: Math.max(0, loads.length - unloadedCoins),
+      firstLoadTimeMs: loadTimes.length ? Math.min(...loadTimes) : null,
+      lastLoadTimeMs: loadTimes.length ? Math.max(...loadTimes) : null,
+      lastBuiltTimeMs: buildTimes.length ? Math.max(...buildTimes) : null,
+      maxLockMs: completed.length ? Math.max(...completed) : null,
+      avgLockMs: completed.length ? completed.reduce((a, b) => a + b, 0) / completed.length : null,
+      pendingLoads: samples.filter((s) => s.pending).length,
+    });
+  }
+  byValue.sort((a, b) => b.loads - a.loads || a.value - b.value);
+
+  return {
+    byValue,
+    builds,
+    lockSamples,
+    totalLoads,
+    totalUnloadedCoins,
+    totalOutstanding: Math.max(0, totalLoads - totalUnloadedCoins),
   };
 }
 

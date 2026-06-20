@@ -21,7 +21,16 @@ import {
   syncStats,
 } from "./stats";
 import { renderStats } from "./statsui";
-import { destroyMetricCharts, drawMetricChart } from "./statschart";
+import { clearStatsCache } from "./statscache";
+import {
+  closeStatsFullscreen,
+  destroyMetricCharts,
+  drawFlowChart,
+  drawMetricChart,
+  openStatsFullscreen,
+  resetFullscreenZoom,
+  resetStatsZoom,
+} from "./statschart";
 import {
   closeTimingChartModal,
   drawTimingChart,
@@ -154,7 +163,7 @@ function shell(): string {
     </div>
     <div id="stats-page" class="page hidden">
       <div class="hist-toolbar">
-        <button id="refresh-stats" title="Re-scan the summit window from the chain tip back to the start. Already-scanned blocks replay from cache; only new tip blocks are read.">Refresh</button>
+        <button id="refresh-stats" title="Clear the stats cache and re-scan the whole summit window from chain — a full fresh reload (slower, but guarantees every chart is current and in sync).">Refresh</button>
         <span id="stats-progress" class="progress hidden"></span>
       </div>
       <div id="stats"></div>
@@ -173,6 +182,14 @@ function shell(): string {
       <button id="chart-modal-close" title="Close (Esc)">✕ close</button>
     </div>
     <div class="modal-canvas-wrap"><canvas id="chart-modal-canvas"></canvas></div>
+  </div>
+  <div id="stats-chart-modal" class="modal hidden">
+    <div class="modal-bar">
+      <span class="modal-title" id="stats-chart-title">Chart</span>
+      <button id="stats-chart-reset" title="Reset pan/zoom to fit all data">reset zoom</button>
+      <button id="stats-chart-close" title="Close (Esc)">✕ close</button>
+    </div>
+    <div class="modal-canvas-wrap"><canvas id="stats-chart-canvas"></canvas></div>
   </div>`;
 }
 
@@ -415,7 +432,18 @@ function setStatsProgress(p: StatsProgress | null): void {
 function redrawStatsCharts(): void {
   if (!state.statsResult) return;
   const el = document.querySelector("#stats")!;
-  for (const m of state.statsResult.metrics) drawMetricChart(el, m, state.statsResult.startMs);
+  const startMs = state.statsResult.startMs;
+  for (const m of state.statsResult.metrics) drawMetricChart(el, m, startMs);
+  drawFlowChart(el, "count", state.statsResult.recyclerFlow, startMs);
+  drawFlowChart(el, "value", state.statsResult.recyclerFlow, startMs);
+}
+
+/** Human title for a stats chart key (for the full-screen modal header). */
+function statsChartTitle(key: string): string {
+  if (key === "flow:count") return "Recycler flow — event count";
+  if (key === "flow:value") return "Recycler flow — value (CASH)";
+  const mk = key.replace(/^metric:/, "");
+  return state.statsResult?.metrics.find((m) => m.key === mk)?.label ?? "Chart";
 }
 
 function renderStatsSection(): void {
@@ -724,7 +752,15 @@ function wire(): void {
     b.addEventListener("click", () => void doLoadHistory(Number(b.getAttribute("data-window"))));
   document.querySelector("#stop-history")!.addEventListener("click", () => state.historyAbort?.abort());
   document.querySelector("#refresh-setup")!.addEventListener("click", () => void doLoadSetup());
-  document.querySelector("#refresh-stats")!.addEventListener("click", () => void doLoadStats(true));
+  document.querySelector("#refresh-stats")!.addEventListener("click", () => {
+    // True fresh reload: drop the on-disk stats cache so nothing is replayed, then
+    // re-scan the whole window from chain. Keeps every chart in sync.
+    void (async () => {
+      if (state.statsBusy) return;
+      await clearStatsCache();
+      await doLoadStats(true);
+    })();
+  });
   document.querySelector("#clear-cache")!.addEventListener("click", () => {
     void (async () => {
       await clearCache();
@@ -791,8 +827,34 @@ function wire(): void {
   };
   document.querySelector("#chart-modal-close")!.addEventListener("click", closeModal);
   document.querySelector("#chart-modal-reset")!.addEventListener("click", () => resetZoom());
+
+  // Stats charts: full-screen + reset zoom (delegated — charts re-render each update).
+  const statsModal = document.querySelector<HTMLDivElement>("#stats-chart-modal")!;
+  const statsCanvas = document.querySelector<HTMLCanvasElement>("#stats-chart-canvas")!;
+  const closeStatsModal = (): void => {
+    statsModal.classList.add("hidden");
+    closeStatsFullscreen();
+  };
+  app.addEventListener("click", (ev) => {
+    const fs = (ev.target as HTMLElement).closest<HTMLElement>(".chart-fs");
+    if (fs) {
+      const key = fs.getAttribute("data-chart");
+      if (!key) return;
+      document.querySelector("#stats-chart-title")!.textContent = statsChartTitle(key);
+      statsModal.classList.remove("hidden");
+      if (!openStatsFullscreen(statsCanvas, key)) closeStatsModal();
+      return;
+    }
+    const rz = (ev.target as HTMLElement).closest<HTMLElement>(".chart-zoom-reset");
+    if (rz) resetStatsZoom(rz.getAttribute("data-chart") ?? "");
+  });
+  document.querySelector("#stats-chart-close")!.addEventListener("click", closeStatsModal);
+  document.querySelector("#stats-chart-reset")!.addEventListener("click", () => resetFullscreenZoom());
+
   document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape" && !modal.classList.contains("hidden")) closeModal();
+    if (ev.key !== "Escape") return;
+    if (!modal.classList.contains("hidden")) closeModal();
+    if (!statsModal.classList.contains("hidden")) closeStatsModal();
   });
 
   // Delegated handler for the per-table CSV export buttons (History page).
